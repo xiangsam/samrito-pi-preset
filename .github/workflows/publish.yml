@@ -1,0 +1,103 @@
+name: Publish to npm
+
+# Publishing is driven by tags: push vX.Y.Z and npm gets that exact version.
+#
+# Authentication uses npm Trusted Publishing (OIDC) — there is deliberately no
+# NPM_TOKEN secret. GitHub mints a short-lived credential for this job via
+# `id-token: write`, and npm also attaches a provenance attestation linking the
+# tarball to this repository and commit.
+#
+# One-time setup, after the package exists on the registry:
+#   npmjs.com -> samrito-pi-preset -> Settings -> Trusted Publisher
+#     Publisher:      GitHub Actions
+#     Organization:   xiangsam
+#     Repository:     samrito-pi-preset
+#     Workflow name:  publish.yml          <- must match this filename
+#     Environment:    (leave empty)
+#
+# Bootstrap note: a trusted publisher can only be configured for a package that
+# already exists on the registry, so the very first version has to be published
+# by other means (npm login && npm publish). That is already done for
+# samrito-pi-preset — 1.0.0 was published manually — so this workflow owns every
+# release from 1.0.1 onward.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  # Lets you re-run a release from the Actions tab without moving a tag.
+  workflow_dispatch:
+
+# contents: read for checkout, id-token: write for the OIDC exchange with npm.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: npm publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Node 24 ships npm 11.x; the explicit upgrade below keeps this working
+      # even if the bundled npm is older than trusted publishing requires
+      # (11.5.1). registry-url is what npm's own trusted-publishing example uses;
+      # the placeholder token setup-node writes is overwritten by the real
+      # OIDC-derived token inside `npm publish`.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          cache: npm
+
+      - name: Require npm >= 11.5.1 (trusted publishing)
+        run: |
+          npm install -g npm@11
+          node -e '
+            const [major, minor, patch] = require("child_process")
+              .execSync("npm --version").toString().trim().split(".").map(Number);
+            const ok = major > 11 || (major === 11 && (minor > 5 || (minor === 5 && patch >= 1)));
+            if (!ok) { console.error("npm too old for trusted publishing"); process.exit(1); }
+          '
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      # Guards against a tag that does not describe the version being shipped.
+      - name: Check tag matches package version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          version="$(node -p "require('./package.json').version")"
+          echo "tag=$tag version=$version"
+          if [ "$tag" != "$version" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+
+      # `node scripts/verify.mjs` loads every extension through pi's own startup
+      # code path. pi is not a dependency of this package, so install it into a
+      # scratch prefix (keeping node_modules, and therefore the tarball, clean)
+      # and point the script at it.
+      - name: Install pi as the verification host
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pi-host" --legacy-peer-deps --no-audit --no-fund \
+            @earendil-works/pi-coding-agent
+          echo "PI_MODULE_PATH=$RUNNER_TEMP/pi-host/node_modules/@earendil-works/pi-coding-agent/dist/index.js" >> "$GITHUB_ENV"
+
+      - name: Verify the bundle resolves and loads
+        run: node scripts/verify.mjs --verbose
+
+      # Re-tagging a released version should not fail the build: it is a no-op.
+      - name: Check whether this version is already published
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "::notice::${name}@${version} is already on the registry — skipping publish."
+            echo "SKIP_PUBLISH=1" >> "$GITHUB_ENV"
+          fi
+
+      - name: Publish with provenance
+        if: env.SKIP_PUBLISH != '1'
+        run: npm publish --provenance --access public
