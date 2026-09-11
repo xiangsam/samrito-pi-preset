@@ -14,6 +14,12 @@ name: Publish to npm
 #     Repository:     samrito-pi-preset
 #     Workflow name:  publish.yml          <- must match this filename
 #     Environment:    (leave empty)
+#     Direct publish: ENABLED
+#
+# "Allow direct publish" is required because the step below runs `npm publish`.
+# A token from a stage-only trust relationship can only run `npm stage publish`
+# and would fail here. npm recommends stage-only; README.md -> Releasing records
+# the trade-off and how to switch.
 #
 # Bootstrap note: a trusted publisher can only be configured for a package that
 # already exists on the registry, so the very first version has to be published

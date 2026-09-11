@@ -169,9 +169,29 @@ configure once at
 | Repository | `samrito-pi-preset` |
 | Workflow name | `publish.yml` |
 | Environment | *(leave empty)* |
+| Allow direct publish | **enabled** |
 
 `publish.yml` must match the workflow **filename** exactly — renaming the file
 means updating this setting too.
+
+This package deliberately enables *direct publish* so a tag ships unattended. npm
+recommends the opposite (stage only, then approve with 2FA); npm's own staged
+publishing docs say to enable only `npm stage publish` and disable `npm publish`.
+The trade-off, stated plainly: with direct publish enabled, anyone who can push a
+tag or edit this workflow can publish to npm, and every consumer of the preset
+pulls that version. To tighten it later:
+
+1. Turn off *allow direct publish* in the trusted publisher settings above
+   (equivalently `npm trust github … --allow-stage-publish` without
+   `--allow-publish`).
+2. Change the workflow's last step to `npm stage publish --provenance --access public`.
+3. After each tag, finish the release locally:
+
+```bash
+npm stage list samrito-pi-preset
+npm stage approve <stage-id>    # prompts for 2FA
+npm stage reject <stage-id>     # to back out instead
+```
 
 ### Publishing by hand
 
