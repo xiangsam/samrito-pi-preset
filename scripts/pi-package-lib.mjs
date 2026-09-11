@@ -17,7 +17,8 @@
  *   collectExtensionFiles() before being written to a bundle manifest.
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -236,4 +237,43 @@ export function directorySize(dir) {
 
 export function relativeToPackage(path) {
 	return relative(PACKAGE_ROOT, path);
+}
+
+/**
+ * Locate pi's ESM entry point so its own package manager and loader can be
+ * imported. Returns undefined when pi is not installed.
+ *
+ * Set PI_MODULE_PATH to point at pi explicitly; otherwise `pi` is looked up on
+ * PATH and its package root walked up to.
+ */
+export function findPiModule() {
+	const override = process.env.PI_MODULE_PATH;
+	if (override && existsSync(override)) return override;
+
+	let binary;
+	try {
+		binary = execFileSync("which", ["pi"], { encoding: "utf-8" }).trim();
+	} catch {
+		return undefined;
+	}
+
+	let current;
+	try {
+		current = dirname(realpathSync(binary));
+	} catch {
+		return undefined;
+	}
+
+	while (current !== dirname(current)) {
+		const manifestPath = join(current, "package.json");
+		if (existsSync(manifestPath)) {
+			const manifest = readJson(manifestPath);
+			if (manifest?.name === "@earendil-works/pi-coding-agent") {
+				const entry = join(current, manifest.exports?.["."]?.import ?? "dist/index.js");
+				return existsSync(entry) ? entry : undefined;
+			}
+		}
+		current = dirname(current);
+	}
+	return undefined;
 }

@@ -87,12 +87,29 @@ jobs:
       # and point the script at it.
       - name: Install pi as the verification host
         run: |
+          mkdir -p "$RUNNER_TEMP/pi-host"
           npm install --prefix "$RUNNER_TEMP/pi-host" --legacy-peer-deps --no-audit --no-fund \
             @earendil-works/pi-coding-agent
           echo "PI_MODULE_PATH=$RUNNER_TEMP/pi-host/node_modules/@earendil-works/pi-coding-agent/dist/index.js" >> "$GITHUB_ENV"
 
       - name: Verify the bundle resolves and loads
         run: node scripts/verify.mjs --verbose
+
+      # Final gate before the artifact goes public: a vendor-scoped provider
+      # package was deliberately excluded from this bundle and must never be
+      # referenced in tracked files. Deliberately scoped to tracked files —
+      # node_modules is gitignored, and the bundled models.dev dataset
+      # legitimately contains that vendor's upstream model ids, so a
+      # tarball-wide grep would fail spuriously. The term is split so this
+      # workflow does not match its own source.
+      - name: Guard excluded provider references
+        run: |
+          term="ten""cent"
+          if git grep -in "$term"; then
+            echo "::error::Found a reference to the excluded provider in tracked files."
+            exit 1
+          fi
+          echo "✓ no references to the excluded provider in tracked files"
 
       # Re-tagging a released version should not fail the build: it is a no-op.
       - name: Check whether this version is already published

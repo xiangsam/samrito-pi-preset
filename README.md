@@ -138,6 +138,35 @@ bundled `node_modules/` keeps every `pi.extensions` path resolvable.
 `prepack` runs `sync-manifest.mjs --check`, so a stale `pi.extensions` fails the
 publish instead of shipping.
 
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs on every push to
+`main` and every pull request. It never touches the registry.
+
+| Job | Checks |
+| --- | --- |
+| `verify` (Node 22 + 24) | manifest integrity, pi resolution, real extension loading via `verify.mjs` |
+| `tarball` | packs, installs, resolves and loads the **published artifact** via `verify-tarball.mjs` |
+
+The `tarball` job exists because the checkout and the published package differ in
+a way that matters: in the checkout npm hoists the plugins into a sibling
+`node_modules/`, but in the tarball `bundledDependencies` must embed them
+*inside* the package root, since `pi.extensions` paths are relative to it. A
+drift between `dependencies` and `bundledDependencies` therefore breaks only the
+published artifact, and `verify.mjs` cannot see it. Run it locally with:
+
+```bash
+npm run verify           # checks the checkout
+npm run verify:tarball   # packs, installs, and loads the real artifact
+```
+
+Both jobs also guard a repo requirement: a vendor-scoped provider package that
+was deliberately excluded from this bundle must never be referenced in tracked
+files. The search term is assembled at runtime inside the workflow so the guard
+cannot match its own source, and it deliberately does **not** scan the packed
+tarball — the bundled upstream `models.dev` dataset contains vendor model ids
+that are none of our business.
+
 ## Releasing
 
 [`.github/workflows/publish.yml`](.github/workflows/publish.yml) publishes on a
@@ -172,7 +201,16 @@ configure once at
 | Allow direct publish | **enabled** |
 
 `publish.yml` must match the workflow **filename** exactly — renaming the file
-means updating this setting too.
+means updating this setting too. All fields are case-sensitive.
+
+Trusted publishing requires **npm CLI ≥ 11.5.1 and Node ≥ 22.14.0**; the workflow
+pins Node 24 and asserts the npm version before publishing. Provenance is
+generated automatically for GitHub Actions, so `--provenance` is explicit rather
+than required.
+
+> **Trusted publisher connections cannot be edited.** npm fixes the provider and
+> its fields once a connection is created, so changing *Allow direct publish*
+> later means deleting the connection and adding a new one.
 
 This package deliberately enables *direct publish* so a tag ships unattended. npm
 recommends the opposite (stage only, then approve with 2FA); npm's own staged
@@ -181,9 +219,8 @@ The trade-off, stated plainly: with direct publish enabled, anyone who can push 
 tag or edit this workflow can publish to npm, and every consumer of the preset
 pulls that version. To tighten it later:
 
-1. Turn off *allow direct publish* in the trusted publisher settings above
-   (equivalently `npm trust github … --allow-stage-publish` without
-   `--allow-publish`).
+1. Delete the trusted publisher above and recreate it with **stage-only**
+   permissions (`npm trust github … --allow-stage-publish`, no `--allow-publish`).
 2. Change the workflow's last step to `npm stage publish --provenance --access public`.
 3. After each tag, finish the release locally:
 
@@ -324,10 +361,12 @@ re-run `setup.mjs`.
 | --- | --- |
 | `extensions/preset.ts` | the bundled `/preset` command (apply config templates) |
 | `scripts/setup.mjs` | install deps, regenerate manifest, copy configs, report conflicts |
-| `scripts/verify.mjs` | 4-stage check: manifest, pi resolution, real loading, startup conflicts |
+| `scripts/verify.mjs` | 4-stage check of the checkout: manifest, pi resolution, real loading, startup conflicts |
+| `scripts/verify-tarball.mjs` | packs the tarball, installs it, and loads it through pi — catches `bundledDependencies` drift |
 | `scripts/sync-manifest.mjs` | regenerate `pi.extensions` (`--check` for drift) |
 | `scripts/pack.sh` | build a tarball (`--with-deps` to include `node_modules`) |
 | `scripts/pi-package-lib.mjs` | shared helpers mirroring pi's resolution rules |
+| `.github/workflows/ci.yml` | verify + artifact checks on push/PR |
 | `.github/workflows/publish.yml` | publish to npm on `vX.Y.Z` tags (trusted publishing) |
 
 ### `verify.mjs`
@@ -388,6 +427,17 @@ node scripts/setup.mjs [--skip-install] [--force-config]
 - **Paths are relative to this package.** `pi.extensions` points into
   `node_modules/`, so the directory must stay where it was installed (or be
   re-installed). Moving it requires re-running `pi install`.
+- **No vendor-locked provider is bundled.** `pi-cliproxyapi-provider` is the
+  proxy provider this preset targets; the previously excluded vendor-scoped
+  alternative must not be re-introduced. CI enforces this with a grep over
+  tracked files (the term is assembled at runtime in the workflow so the guard
+  cannot match itself), and `scripts/pi-package-lib.mjs`'s `EXCLUDED_PACKAGES`
+  lists what is deliberately skipped.
+- **Traditional token publishing should stay disabled.** npm's *Require
+  two-factor authentication and disallow tokens* setting affects only traditional
+  token auth: "Your trusted publishers will continue to work normally, as they
+  use OIDC tokens." So it is safe — and recommended — to enable it while relying
+  on the trusted publisher.
 - **Do not commit `node_modules/`** unless you intend to distribute via tarball
   with `--with-deps`.
 - **`/preset` assumes the bundled layout.** It resolves templates relative to

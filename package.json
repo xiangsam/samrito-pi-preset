@@ -44,6 +44,7 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "verify": "node scripts/verify.mjs",
+    "verify:tarball": "node scripts/verify-tarball.mjs",
     "pack": "bash scripts/pack.sh",
     "sync": "node scripts/sync-manifest.mjs",
     "prepack": "node scripts/sync-manifest.mjs --check"

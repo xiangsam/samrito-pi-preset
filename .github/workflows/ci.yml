@@ -1,0 +1,106 @@
+name: CI
+
+# Checks every push to main and every PR. Publishing lives in publish.yml and is
+# tag-driven, so this workflow never touches the registry.
+#
+# Two independent jobs, because they check different things:
+#   verify  — the checkout (manifest, pi resolution, real extension loading)
+#   tarball — the packed artifact users actually install
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  npm_config_fund: "false"
+  npm_config_audit: "false"
+
+jobs:
+  verify:
+    name: verify (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22 is pi's floor (engines: node >=22.19.0); 24 matches publish.yml.
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      # pi is not a dependency of this package. Install it into a scratch prefix
+      # so node_modules — and therefore the packaged tarball — stays clean. The
+      # prefix must exist first; pi's own installer does the same thing.
+      - name: Install pi as the verification host
+        run: |
+          mkdir -p "$RUNNER_TEMP/pi-host"
+          npm install --prefix "$RUNNER_TEMP/pi-host" --legacy-peer-deps \
+            @earendil-works/pi-coding-agent
+          echo "PI_MODULE_PATH=$RUNNER_TEMP/pi-host/node_modules/@earendil-works/pi-coding-agent/dist/index.js" >> "$GITHUB_ENV"
+
+      # Loads every extension through pi's real startup path, and fails if
+      # pi.extensions has drifted from the installed tree.
+      - name: Verify manifest, resolution, and loading
+        run: node scripts/verify.mjs --verbose
+
+      # Guards a repo requirement: a vendor-scoped provider package was
+      # deliberately excluded from this bundle and must never be referenced in
+      # tracked files. node_modules is gitignored, so this only sees our own
+      # files — do not widen it to the tarball, whose bundled upstream
+      # models.dev dataset legitimately carries that vendor's model ids.
+      # The term is split so this workflow does not match its own source.
+      - name: Guard excluded provider references
+        run: |
+          term="ten""cent"
+          if git grep -in "$term"; then
+            echo "::error::Found a reference to the excluded provider in tracked files."
+            exit 1
+          fi
+          echo "✓ no references to the excluded provider in tracked files"
+
+  tarball:
+    name: packaged tarball
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Install pi as the verification host
+        run: |
+          mkdir -p "$RUNNER_TEMP/pi-host"
+          npm install --prefix "$RUNNER_TEMP/pi-host" --legacy-peer-deps \
+            @earendil-works/pi-coding-agent
+          echo "PI_MODULE_PATH=$RUNNER_TEMP/pi-host/node_modules/@earendil-works/pi-coding-agent/dist/index.js" >> "$GITHUB_ENV"
+
+      # `npm pack` -> install into a throwaway prefix -> resolve and load through
+      # pi. This is the only check that catches a `dependencies` /
+      # `bundledDependencies` drift, since npm hoists plugins out of the package
+      # root in the checkout but must embed them in the tarball.
+      - name: Pack, install, and load the real artifact
+        run: node scripts/verify-tarball.mjs --verbose
+
+      - name: Report packed contents
+        run: npm pack --dry-run
