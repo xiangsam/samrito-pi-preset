@@ -1,5 +1,8 @@
 *.tgz
 node_modules/
 
-# pi runtime state (background task logs, scratch dirs) — not source.
+# pi runtime state — background task logs and fusion work artifacts. Not source.
+# `.pi/settings.json` is deliberately NOT ignored: pi documents project settings
+# as shareable with a team, so it should be committable when it exists.
 .pi/tasks/
+.pi/fusion/
