@@ -1,0 +1,73 @@
+{
+  "name": "samrito-pi-preset",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Portable pi agent setup: bundles the extension collection and user config templates so another machine can be brought up with one install.",
+  "keywords": [
+    "pi-package",
+    "pi-extensions"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xiangsam/samrito-pi-preset.git"
+  },
+  "homepage": "https://github.com/xiangsam/samrito-pi-preset#readme",
+  "bugs": {
+    "url": "https://github.com/xiangsam/samrito-pi-preset/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "config",
+    "extensions",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "extensions/preset.ts",
+      "node_modules/@gotgenes/pi-subagents/src/index.ts",
+      "node_modules/@juicesharp/rpiv-ask-user-question/index.ts",
+      "node_modules/@juicesharp/rpiv-todo/index.ts",
+      "node_modules/@narumitw/pi-btw/dist/index.ts",
+      "node_modules/pi-background-tasks/extensions/anthropic-attribution.ts",
+      "node_modules/pi-background-tasks/extensions/background-tasks.ts",
+      "node_modules/pi-cliproxyapi-provider/extensions/index.ts",
+      "node_modules/pi-goal-x/extensions/goal.ts",
+      "node_modules/pi-tool-display/index.ts",
+      "node_modules/pi-zentui/extensions/zentui/index.ts"
+    ]
+  },
+  "scripts": {
+    "setup": "node scripts/setup.mjs",
+    "verify": "node scripts/verify.mjs",
+    "pack": "bash scripts/pack.sh",
+    "sync": "node scripts/sync-manifest.mjs",
+    "prepack": "node scripts/sync-manifest.mjs --check"
+  },
+  "dependencies": {
+    "@gotgenes/pi-subagents": "^21.6.0",
+    "@juicesharp/rpiv-ask-user-question": "^2.9.0",
+    "@juicesharp/rpiv-todo": "^2.9.0",
+    "@narumitw/pi-btw": "^0.58.1",
+    "pi-background-tasks": "^2.5.0",
+    "pi-cliproxyapi-provider": "^0.15.30",
+    "pi-goal-x": "^0.31.2",
+    "pi-tool-display": "^0.5.0",
+    "pi-zentui": "^0.23.0"
+  },
+  "bundledDependencies": [
+    "@gotgenes/pi-subagents",
+    "@juicesharp/rpiv-ask-user-question",
+    "@juicesharp/rpiv-todo",
+    "@narumitw/pi-btw",
+    "pi-background-tasks",
+    "pi-cliproxyapi-provider",
+    "pi-goal-x",
+    "pi-tool-display",
+    "pi-zentui"
+  ]
+}

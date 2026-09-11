@@ -1,0 +1,5 @@
+*.tgz
+node_modules/
+
+# pi runtime state (background task logs, scratch dirs) — not source.
+.pi/tasks/
