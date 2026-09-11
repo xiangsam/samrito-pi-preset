@@ -1,6 +1,6 @@
 {
   "name": "samrito-pi-preset",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "description": "Portable pi agent setup: bundles the extension collection and user config templates so another machine can be brought up with one install.",
   "keywords": [
@@ -33,9 +33,9 @@
       "node_modules/@juicesharp/rpiv-ask-user-question/index.ts",
       "node_modules/@juicesharp/rpiv-todo/index.ts",
       "node_modules/@narumitw/pi-btw/dist/index.ts",
+      "node_modules/@samrito/pi-cliproxyapi-provider/extensions/index.ts",
       "node_modules/pi-background-tasks/extensions/anthropic-attribution.ts",
       "node_modules/pi-background-tasks/extensions/background-tasks.ts",
-      "node_modules/pi-cliproxyapi-provider/extensions/index.ts",
       "node_modules/pi-goal-x/extensions/goal.ts",
       "node_modules/pi-tool-display/index.ts",
       "node_modules/pi-zentui/extensions/zentui/index.ts"
@@ -54,8 +54,8 @@
     "@juicesharp/rpiv-ask-user-question": "^2.9.0",
     "@juicesharp/rpiv-todo": "^2.9.0",
     "@narumitw/pi-btw": "^0.58.1",
+    "@samrito/pi-cliproxyapi-provider": "^0.16.0",
     "pi-background-tasks": "^2.5.0",
-    "pi-cliproxyapi-provider": "^0.15.30",
     "pi-goal-x": "^0.31.2",
     "pi-tool-display": "^0.5.0",
     "pi-zentui": "^0.23.0"
@@ -65,8 +65,8 @@
     "@juicesharp/rpiv-ask-user-question",
     "@juicesharp/rpiv-todo",
     "@narumitw/pi-btw",
+    "@samrito/pi-cliproxyapi-provider",
     "pi-background-tasks",
-    "pi-cliproxyapi-provider",
     "pi-goal-x",
     "pi-tool-display",
     "pi-zentui"

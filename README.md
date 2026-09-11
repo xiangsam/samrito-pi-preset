@@ -1,7 +1,7 @@
 # samrito-pi-preset
 
 A portable [pi](https://pi.dev) package that bundles this machine's extension
-collection (including the `pi-cliproxyapi-provider` provider) under a single
+collection (including the `@samrito/pi-cliproxyapi-provider` provider) under a single
 `pi install`-able package.
 
 Install it from npm in one command:
@@ -55,7 +55,7 @@ managed separately, or copy the directory to the target machine.
 | `@juicesharp/rpiv-todo` | ^2.9.0 | `index.ts` |
 | `@narumitw/pi-btw` | ^0.58.1 | `dist/index.ts` |
 | `pi-background-tasks` | ^2.5.0 | `extensions/*.ts` (2) |
-| `pi-cliproxyapi-provider` | ^0.15.30 | `extensions/index.ts` |
+| `@samrito/pi-cliproxyapi-provider` | ^0.16.0 | `extensions/index.ts` |
 | `pi-goal-x` | ^0.31.2 | `extensions/goal.ts` |
 | `pi-tool-display` | ^0.5.0 | `index.ts` |
 | `pi-zentui` | ^0.23.0 | `extensions/zentui/index.ts` |
@@ -427,12 +427,18 @@ node scripts/setup.mjs [--skip-install] [--force-config]
 - **Paths are relative to this package.** `pi.extensions` points into
   `node_modules/`, so the directory must stay where it was installed (or be
   re-installed). Moving it requires re-running `pi install`.
-- **No vendor-locked provider is bundled.** `pi-cliproxyapi-provider` is the
-  proxy provider this preset targets; the previously excluded vendor-scoped
-  alternative must not be re-introduced. CI enforces this with a grep over
-  tracked files (the term is assembled at runtime in the workflow so the guard
-  cannot match itself), and `scripts/pi-package-lib.mjs`'s `EXCLUDED_PACKAGES`
-  lists what is deliberately skipped.
+- **The provider is a fork.** `@samrito/pi-cliproxyapi-provider` is a fork of
+  the upstream `pi-cliproxyapi-provider`, adding thinking levels derived from
+  models.dev `reasoning_options`. It keeps the upstream settings namespace,
+  config paths, cache directory, and `/cliproxyapi` command, so it is a drop-in
+  replacement — but the two must not be installed together, since both register
+  the same provider and command and pi rejects the duplicate.
+- **No vendor-locked provider is bundled.** The vendor-scoped provider package
+  that was previously excluded from this bundle must not be re-introduced. CI
+  enforces this with a grep over tracked files (the term is assembled at runtime
+  in the workflow so the guard cannot match its own source), and
+  `scripts/pi-package-lib.mjs`'s `EXCLUDED_PACKAGES` lists what is deliberately
+  skipped — currently empty.
 - **Traditional token publishing should stay disabled.** npm's *Require
   two-factor authentication and disallow tokens* setting affects only traditional
   token auth: "Your trusted publishers will continue to work normally, as they
