@@ -44,14 +44,14 @@ jobs:
     name: npm publish
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # Node 24 ships npm 11.x; the explicit upgrade below keeps this working
       # even if the bundled npm is older than trusted publishing requires
       # (11.5.1). registry-url is what npm's own trusted-publishing example uses;
       # the placeholder token setup-node writes is overwritten by the real
       # OIDC-derived token inside `npm publish`.
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
