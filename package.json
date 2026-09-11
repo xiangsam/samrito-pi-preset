@@ -1,6 +1,6 @@
 {
   "name": "samrito-pi-preset",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "type": "module",
   "description": "Portable pi agent setup: bundles the extension collection and user config templates so another machine can be brought up with one install.",
   "keywords": [
