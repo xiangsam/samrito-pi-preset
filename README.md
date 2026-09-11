@@ -111,14 +111,11 @@ Because it does not work, and cannot ask:
 ## Publish and install from npm
 
 The package is a normal, publishable npm package (`private` is not set), and
-`bundledDependencies` makes npm pack every plugin into the tarball. Publish
-once, then install anywhere with `pi install npm:samrito-pi-preset`.
+`bundledDependencies` makes npm pack every plugin into the tarball. Install it
+anywhere with `pi install npm:samrito-pi-preset`.
 
-```bash
-npm login                 # once per machine
-node scripts/verify.mjs   # optional but recommended before publishing
-npm publish               # runs prepack -> sync-manifest --check
-```
+Releases are driven by tags: pushing `vX.Y.Z` makes GitHub Actions publish that
+exact version. See [Releasing](#releasing) for the one-time npm setup.
 
 On the target machine:
 
@@ -140,6 +137,51 @@ bundled `node_modules/` keeps every `pi.extensions` path resolvable.
 
 `prepack` runs `sync-manifest.mjs --check`, so a stale `pi.extensions` fails the
 publish instead of shipping.
+
+## Releasing
+
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml) publishes on a
+`vX.Y.Z` tag using npm **trusted publishing** (OIDC): no long-lived `NPM_TOKEN`
+secret exists, and npm attaches a provenance attestation linking the tarball to
+the repository and commit.
+
+```bash
+npm version patch        # or minor / major — bumps package.json and tags vX.Y.Z
+git push --follow-tags    # workflow runs, verifies, publishes
+```
+
+The workflow refuses a tag that disagrees with `package.json`, runs
+`scripts/verify.mjs` (loading every extension through pi's real startup path),
+and treats re-tagging an already published version as a no-op rather than a
+failure.
+
+### One-time setup
+
+A trusted publisher can only be configured for a package that already exists, so
+the first version was published manually. `samrito-pi-preset@1.0.0` exists, so
+configure once at
+[npmjs.com](https://www.npmjs.com/package/samrito-pi-preset/access):
+
+| Field | Value |
+| --- | --- |
+| Publisher | GitHub Actions |
+| Organization | `xiangsam` |
+| Repository | `samrito-pi-preset` |
+| Workflow name | `publish.yml` |
+| Environment | *(leave empty)* |
+
+`publish.yml` must match the workflow **filename** exactly — renaming the file
+means updating this setting too.
+
+### Publishing by hand
+
+Still possible if OIDC is unavailable; `prepack` keeps the manifest honest.
+
+```bash
+npm login                 # once per machine
+node scripts/verify.mjs   # optional but recommended
+npm publish               # runs prepack -> sync-manifest --check
+```
 
 After the first restart, run `/preset` to apply the shipped config templates —
 they are deliberately not written automatically.
@@ -266,6 +308,7 @@ re-run `setup.mjs`.
 | `scripts/sync-manifest.mjs` | regenerate `pi.extensions` (`--check` for drift) |
 | `scripts/pack.sh` | build a tarball (`--with-deps` to include `node_modules`) |
 | `scripts/pi-package-lib.mjs` | shared helpers mirroring pi's resolution rules |
+| `.github/workflows/publish.yml` | publish to npm on `vX.Y.Z` tags (trusted publishing) |
 
 ### `verify.mjs`
 
