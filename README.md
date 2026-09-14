@@ -14,14 +14,16 @@ The plugins are packed into the tarball (`bundledDependencies`), so nothing is
 fetched from the registry at load time and no setup step is required. See
 [Publish and install from npm](#publish-and-install-from-npm).
 
-Config templates (appearance, tool rendering) are shipped but never written
-behind your back — apply them with one slash command after the first restart:
+Config templates (permission rules, provider endpoint, tool-surface opt-out) and
+per-plugin enable/disable are shipped but never applied behind your back — one
+slash command after the first restart:
 
 ```
 /preset
 ```
 
-See [Applying the config templates](#applying-the-config-templates).
+See [Applying the config templates](#applying-the-config-templates) and
+[Disabling a bundled plugin](#disabling-a-bundled-plugin).
 
 If you prefer a local checkout:
 
@@ -39,26 +41,34 @@ pi install "$PWD"          # register with pi
 
 | Resource | Source | Notes |
 | --- | --- | --- |
-| Extensions | 9 npm plugins + `/preset`, 11 entry files | see [Bundled plugins](#bundled-plugins) |
-| `config/zentui.json` | `~/.pi/agent/zentui.json` | pi-zentui appearance |
-| `config/pi-tool-display.config.json` | `~/.pi/agent/extensions/pi-tool-display/config.json` | tool rendering |
+| Extensions | 10 npm plugins + `/preset`, 11 entry files | see [Bundled plugins](#bundled-plugins) |
+| Themes | `@nguyenquangthai/pi-omp-theme`, 2 files | re-declared in `pi.themes`; a `pi` manifest disables theme discovery |
+| `config/pi-permission-system.config.json` | `~/.pi/agent/extensions/pi-permission-system/config.json` | permission rules |
+| `config/pi-cliproxyapi-provider.config.json` | `~/.pi/agent/pi-cliproxyapi-provider/config.json` | provider endpoint and auth |
+| `config/no-readonly-tool-autoload.ts` | `~/.pi/agent/extensions/no-readonly-tool-autoload.ts` | keeps `grep`/`find`/`ls` out of the tool set the theme forces on |
+
+`no-readonly-tool-autoload.ts` deliberately lands in the agent dir's own
+`extensions/` directory rather than in `pi.extensions`: local auto-discovered
+extensions run **before** package extensions, and the file has to see the tool
+set pi started with in order to tell an opt-in from the theme's injection.
 
 Personal skills under `~/.agents/skills/` are **not** bundled — keep those
 managed separately, or copy the directory to the target machine.
 
 ### Bundled plugins
 
-| Plugin | Version | Extension files |
+| Plugin | Version | Files |
 | --- | --- | --- |
-| `@gotgenes/pi-subagents` | ^21.6.0 | `src/index.ts` |
-| `@juicesharp/rpiv-ask-user-question` | ^2.9.0 | `index.ts` |
-| `@juicesharp/rpiv-todo` | ^2.9.0 | `index.ts` |
+| `@gotgenes/pi-permission-system` | ^32.0.2 | `src/index.ts` |
+| `@gotgenes/pi-subagents` | ^21.7.0 | `src/index.ts` |
+| `@juicesharp/rpiv-ask-user-question` | ^2.10.1 | `index.ts` |
+| `@juicesharp/rpiv-todo` | ^2.10.1 | `index.ts` |
 | `@narumitw/pi-btw` | ^0.58.1 | `dist/index.ts` |
-| `pi-background-tasks` | ^2.5.0 | `extensions/*.ts` (2) |
+| `@nguyenquangthai/pi-omp-theme` | ^1.0.12 | `dist/extensions/pi-omp-theme.ts`, 2 themes |
+| `@sakiko233/pi-background-tasks` | ^3.1.0 | `extensions/background-tasks.ts` |
 | `@samrito/pi-cliproxyapi-provider` | ^0.16.0 | `extensions/index.ts` |
+| `pi-context-view` | ^0.5.2 | `src/index.ts` |
 | `pi-goal-x` | ^0.31.2 | `extensions/goal.ts` |
-| `pi-tool-display` | ^0.5.0 | `index.ts` |
-| `pi-zentui` | ^0.23.0 | `extensions/zentui/index.ts` |
 
 All packages here are bundled into the published tarball, so the target machine
 needs no registry access to load them (see [How it works](#how-it-works)).
@@ -66,18 +76,20 @@ needs no registry access to load them (see [How it works](#how-it-works)).
 `extensions/preset.ts` is this package's **own** extension. It ships the
 `/preset` command described below and registers no tools, so it never conflicts
 with the plugins it bundles.
-
 ## Applying the config templates
 
-`config/*.json` are files that *other* extensions read from the pi agent dir at
+`config/` holds files that *other* extensions read from the pi agent dir at
 startup. They cannot travel in the package itself, so the bundled `/preset`
 command copies them on request:
 
 ```
-/preset                 show status, then ask which configs to apply
-/preset status          show status only
+/preset                 status, then ask which config templates to apply
+/preset status          config template + bundled plugin status
 /preset apply           write configs that are missing (never overwrites)
 /preset apply --force   write all configs, backing up what exists
+/preset list            bundled plugins and whether they are disabled
+/preset remove <plugin> stop loading bundled plugin(s)
+/preset add <plugin>    load them again
 /preset help            this message
 ```
 
@@ -93,6 +105,61 @@ Scripted and CI use is still supported:
 node ~/.pi/agent/npm/node_modules/samrito-pi-preset/scripts/setup.mjs \
   --skip-install --force-config
 ```
+
+## Disabling a bundled plugin
+
+```
+/preset list                            # what is bundled, what is disabled
+/preset remove pi-goal-x pi-context-view # stop loading them
+/preset add  pi-goal-x                   # load them again
+# then /reload, or restart pi
+```
+
+**Why a filter instead of a real uninstall.** Bundled plugins are not pi
+packages in their own right: they live inside this package's `node_modules` and
+have no `packages[]` entry of their own, so `pi remove npm:<plugin>` cannot
+address them, and deleting their files lasts only until the next `npm install`
+restores them. The one mechanism that survives `pi update --extensions` is pi's
+own package filter — a `-relative/path` entry in this package's `packages[]`
+entry:
+
+```json
+{
+  "packages": [
+    {
+      "source": "npm:samrito-pi-preset",
+      "extensions": ["-node_modules/pi-goal-x/extensions/goal.ts"]
+    }
+  ]
+}
+```
+
+`/preset remove` appends those paths (including a plugin's themes), `/preset add`
+drops them again and collapses the entry back to `"npm:samrito-pi-preset"` when
+nothing is filtered. `pi list` shows the entry as `(filtered)` while a filter is
+in place, and `pi config` edits the same array — a space-toggle there and
+`/preset remove` here cannot disagree about the result.
+
+What this does and does not do:
+
+- **It stops pi loading the plugin.** Extensions and themes are dropped from
+  resolution; the tool set goes back to what the remaining plugins provide.
+- **It keeps the files on disk**, so `/preset add` is instant and offline. Disk
+  usage is unchanged (the whole bundle is ~8 MB packed).
+- **It survives updates.** `pi update --extensions` may restore the files, but
+  the filter still keeps them out of the load list.
+- **It does not remove the config templates** those plugins read. A disabled
+  plugin's config in the agent dir is inert; delete it if you want it gone.
+- **It needs a `packages[]` entry.** If this package is not registered in
+  `settings.json`, `/preset remove` says so instead of writing a file nobody
+  reads.
+- **It refuses to disable `/preset` itself.**
+
+If you would rather have each plugin as a first-class, individually removable
+pi package, do not use this bundle: install the plugins directly
+(`pi install npm:<plugin>`, one entry each in `settings.json`) and use
+`pi remove` per plugin. That trades one-command setup and a locked version set
+for full independence.
 
 ### Why not a `postinstall` script?
 
@@ -132,10 +199,10 @@ bundled `node_modules/` keeps every `pi.extensions` path resolvable.
 > entry *relative to the package root*, and its manifest format has no support
 > for hoisted (sibling) installs. When pi runs `npm install` for an `npm:`
 > source, npm hoists plain `dependencies` next to the package, so paths like
-> `node_modules/pi-zentui/...` would not exist under the package root. Bundling
+> `node_modules/pi-goal-x/...` would not exist under the package root. Bundling
 > them inside the tarball is the layout pi's docs prescribe.
 
-`prepack` runs `sync-manifest.mjs --check`, so a stale `pi.extensions` fails the
+`prepack` runs `sync-manifest.mjs --check`, so a stale `pi` manifest fails the
 publish instead of shipping.
 
 ## CI
@@ -145,8 +212,8 @@ publish instead of shipping.
 
 | Job | Checks |
 | --- | --- |
-| `verify` (Node 22 + 24) | manifest integrity, pi resolution, real extension loading via `verify.mjs` |
-| `tarball` | packs, installs, resolves and loads the **published artifact** via `verify-tarball.mjs` |
+| `verify` (Node 22 + 24) | manifest integrity, pi resolution, real extension loading, plugin filters, and the `/preset` command itself — `verify.mjs` stages 1–6 |
+| `tarball` | packs, installs, resolves and loads the **published artifact**, and re-tests a `/preset remove` filter against that npm-installed copy |
 
 The `tarball` job exists because the checkout and the published package differ in
 a way that matters: in the checkout npm hoists the plugins into a sibling
@@ -243,20 +310,47 @@ npm publish               # runs prepack -> sync-manifest --check
 After the first restart, run `/preset` to apply the shipped config templates —
 they are deliberately not written automatically.
 
-## Recommended rollout (this machine)
+## Two supported arrangements
 
-This bundle and the existing per-plugin `npm:` entries both provide the same
-extensions. Having both configured is fatal, so migrate in one step:
+This bundle and per-plugin `npm:` entries provide the same extensions, and pi
+refuses to load both copies: a duplicate extension aborts startup with
+`Tool "x" conflicts with ...`. So each machine picks one arrangement.
+
+**A. The bundle** — one `packages[]` entry, per-plugin control through `/preset`:
 
 ```bash
-cd samrito-pi-preset
-node scripts/setup.mjs --migrate-settings   # keeps settings.json.bak
-node scripts/verify.mjs                    # must print OK
+pi install npm:samrito-pi-preset
+/preset remove pi-goal-x        # stop loading the ones you do not want here
+```
+
+**B. Individual packages** — one `packages[]` entry per plugin, `pi remove` per
+plugin:
+
+```bash
+pi install npm:@gotgenes/pi-subagents
+pi install npm:pi-goal-x
+# ...
+pi remove npm:pi-goal-x         # a real uninstall, files and all
+```
+
+`/preset` is only available in arrangement A, because the command ships inside
+this package.
+
+To move a machine from B to A:
+
+```bash
+npm install                       # so this checkout has node_modules
+node scripts/setup.mjs --migrate-settings   # drops the per-plugin entries, keeps settings.json.bak
+node scripts/verify.mjs                     # must print OK
+pi install "$PWD"                 # or pi install npm:samrito-pi-preset
 # restart pi
 ```
 
 `--migrate-settings` removes only the bundled plugin entries; your theme,
-provider defaults, and other settings are preserved.
+provider defaults, and other settings are preserved. Moving from A to B is the
+reverse: `/preset list` names the bundled plugins, `pi remove
+npm:samrito-pi-preset` drops the bundle, then install the plugins you want
+individually.
 
 ## Install from a local copy
 
@@ -278,11 +372,11 @@ bundled plugin (see below). Add `--migrate-settings` to have it clean those up.
 ### From a tarball
 
 ```bash
-bash scripts/pack.sh                 # -> samrito-pi-preset-1.0.0.tar.gz
+bash scripts/pack.sh                 # -> samrito-pi-preset-1.1.0.tar.gz
 bash scripts/pack.sh --with-deps     # include node_modules (offline install)
 
 # on the target machine
-tar -xzf samrito-pi-preset-1.0.0.tar.gz
+tar -xzf samrito-pi-preset-1.1.0.tar.gz
 cd samrito-pi-preset && node scripts/setup.mjs
 pi install "$PWD"
 ```
@@ -293,17 +387,20 @@ that is a file as a single extension. Always extract first.
 ## How it works
 
 `package.json` declares the plugins as regular npm `dependencies`, then lists
-their entry files under `pi.extensions`:
+their entry files under `pi.extensions` and their themes under `pi.themes`:
 
 ```json
 "pi": {
   "extensions": [
-    "node_modules/pi-zentui/extensions/zentui/index.ts"
+    "node_modules/pi-goal-x/extensions/goal.ts"
+  ],
+  "themes": [
+    "node_modules/@nguyenquangthai/pi-omp-theme/themes/titanium.json"
   ]
 }
 ```
 
-Two pi behaviours shape this design:
+Three pi behaviours shape this design:
 
 1. **Local-path packages are not installed.** pi runs `npm install` for `npm:`
    and `git:` sources, but a local directory is registered as-is
@@ -312,17 +409,24 @@ Two pi behaviours shape this design:
 
 2. **The loader imports each entry path directly.** A directory entry fails with
    `Cannot find module`. This matters because some plugins declare a *directory*
-   in their own manifest — `pi-zentui` declares `["./extensions"]` — and pi
-   passes that through verbatim. So entries must be concrete files.
+   in their own manifest — `@nguyenquangthai/pi-omp-theme` declares
+   `["./themes"]` — and pi passes that through verbatim for extensions, so
+   entries must be concrete files.
 
-That second point is why `pi.extensions` is generated rather than hand-written:
-`scripts/sync-manifest.mjs` expands each plugin through pi's own resolution rules
-and writes the resulting files. It also lists this package's own
-`extensions/*.ts`: declaring `pi.extensions` disables pi's convention-directory
-discovery, so the bundled `/preset` extension would otherwise never load.
-`setup.mjs` runs the sync automatically, so run `setup.mjs` after any version
-bump (`npm run sync` does it standalone). `verify.mjs` fails when the manifest
-drifts from the installed tree.
+3. **A `pi` manifest disables convention-directory discovery for every resource
+   type.** The moment `pi.extensions` exists, pi stops looking in `themes/`,
+   `skills/`, and `prompts/`. Bundled themes therefore have to be re-declared in
+   `pi.themes` or they are silently never loaded — there is no error, the theme
+   just does not exist. `verify.mjs` asserts the resolved theme count for this
+   reason.
+
+That second and third point are why the `pi` manifest is generated rather than
+hand-written: `scripts/sync-manifest.mjs` expands each plugin through pi's own
+resolution rules and writes the resulting files into `pi.extensions` and
+`pi.themes`. It also lists this package's own `extensions/*.ts`: an unlisted own
+entry would equally never load. `setup.mjs` runs the sync automatically, so run
+`setup.mjs` after any version bump (`npm run sync` does it standalone).
+`verify.mjs` fails when the manifest drifts from the installed tree.
 
 `dependencies` and `bundledDependencies` list the same plugins. The former is
 what `setup.mjs` installs into the checkout's `node_modules`; the latter makes
@@ -350,22 +454,33 @@ re-run `setup.mjs`.
    both in sync so npm-installed copies still resolve).
 2. If it should be skipped, add it to `EXCLUDED_PACKAGES` in
    `scripts/pi-package-lib.mjs` (currently empty).
-3. Run `npm install && node scripts/setup.mjs` — `pi.extensions` is regenerated
-   automatically.
+3. Run `npm install && node scripts/setup.mjs` — `pi.extensions` and
+   `pi.themes` are regenerated automatically.
 4. `node scripts/verify.mjs` to confirm it loads,
    `npm pack --dry-run` to confirm the plugin lands in the tarball.
+
+Converting the bundle into individually installable packages is the same edit
+in the other direction: drop the plugin from all three lists, add a
+`config/plugins.json`-style inventory if you want `/preset` to install them by
+name, and let each machine `pi install npm:<plugin>` on its own. Bundled
+plugins are invisible to `pi remove`, which is the trade-off documented in
+[Disabling a bundled plugin](#disabling-a-bundled-plugin).
+
+To stop bundling a plugin on **one machine only**, use `/preset remove` rather
+than editing this repository: the filter in `settings.json` is what pi reads,
+and it keeps working after the next update reinstates the files.
 
 ## Scripts
 
 | Script | Purpose |
 | --- | --- |
-| `extensions/preset.ts` | the bundled `/preset` command (apply config templates) |
+| `extensions/preset.ts` | the bundled `/preset` command (config templates + per-plugin enable/disable) |
 | `scripts/setup.mjs` | install deps, regenerate manifest, copy configs, report conflicts |
-| `scripts/verify.mjs` | 4-stage check of the checkout: manifest, pi resolution, real loading, startup conflicts |
+| `scripts/verify.mjs` | 6-stage check of the checkout: manifest, pi resolution, real loading, plugin filters, the `/preset` command, startup conflicts |
 | `scripts/verify-tarball.mjs` | packs the tarball, installs it, and loads it through pi — catches `bundledDependencies` drift |
-| `scripts/sync-manifest.mjs` | regenerate `pi.extensions` (`--check` for drift) |
+| `scripts/sync-manifest.mjs` | regenerate `pi.extensions` + `pi.themes` (`--check` for drift) |
 | `scripts/pack.sh` | build a tarball (`--with-deps` to include `node_modules`) |
-| `scripts/pi-package-lib.mjs` | shared helpers mirroring pi's resolution rules |
+| `scripts/pi-package-lib.mjs` | shared helpers mirroring pi's resolution rules; also the filter reader/writer `/preset` uses |
 | `.github/workflows/ci.yml` | verify + artifact checks on push/PR |
 | `.github/workflows/publish.yml` | publish to npm on `vX.Y.Z` tags (trusted publishing) |
 
@@ -373,14 +488,19 @@ re-run `setup.mjs`.
 
 | Stage | Checks |
 | --- | --- |
-| 1. Manifest | entries exist, are files not directories, no excluded plugin declared, no drift |
-| 2. Resolution | pi's `DefaultPackageManager` resolves the bundle in a throwaway agent dir |
-| 3. Loading | pi's `loadExtensions()` imports every entry — the exact startup code path |
-| 4. Startup conflicts | bundled plugins still listed in `settings.json` (fatal — see below) |
+| 1. Manifest | entries exist, are files not directories, themes belong to a declared dependency, no excluded plugin declared, no drift, config templates present |
+| 2. Resolution | pi's `DefaultPackageManager` resolves the bundle — extensions *and* themes — in a throwaway agent dir |
+| 3. Loading | pi's `loadExtensions()` imports every entry — the exact startup code path — and `/preset` is registered |
+| 4. Plugin filters | the `packages[]` filter `/preset remove` writes really does disable exactly those plugins (extensions and themes), `/preset add` restores them, and removing `/preset` itself is refused |
+| 5. `/preset` command | drives the real command handler against a scratch agent dir: list/status/apply/apply --force/remove/add, plus the error paths (unknown plugin, missing name, unknown subcommand, no `packages[]` entry) |
+| 6. Startup conflicts | bundled plugins still listed in `settings.json` while the bundle itself is installed (fatal — see below); a machine that installs the plugins individually instead gets a migration note, not a failure |
 
 Stage 3 deliberately uses `loadExtensions` rather than `discoverAndLoadExtensions`:
 the latter silently expands directory paths and would hide the
-`Cannot find module` failure described above.
+`Cannot find module` failure described above. Stage 4 and 5 exist because the
+filter and the command are the parts most likely to rot silently: a filter that
+is written but not honoured, or a command that writes the wrong shape, would
+otherwise only show up on a user's machine.
 
 ### Why duplicate entries are fatal
 
@@ -411,16 +531,31 @@ node scripts/setup.mjs [--skip-install] [--force-config]
 ## Caveats
 
 - **Config templates need one command.** pi loads extensions from the tarball,
-  but `zentui.json` and the `pi-tool-display` config live in the agent dir.
-  Run `/preset` (or `setup.mjs --skip-install --force-config`) to apply them.
-- **Only `zentui.json` and the tool-display config are versioned.** They are
-  plain config files, so `/preset apply` refuses to overwrite local edits;
-  `--force` backs them up first.
+  but the permission rules, the provider endpoint, and the read-only tool opt-out
+  live in the agent dir. Run `/preset` (or `setup.mjs --skip-install
+  --force-config`) to apply them.
+- **Only those three templates are versioned.** They are plain files, so
+  `/preset apply` refuses to overwrite local edits; `--force` backs them up
+  first.
 - **Model/provider settings are not migrated.** `auth.json`, `models-store.json`,
   and provider defaults in `settings.json` are machine- and credential-specific
-  and are never copied. Set `defaultProvider`/`defaultModel` manually.
-  (`/preset` deliberately does not edit `settings.json` — pi owns that file and
-  may rewrite it while running.)
+  and are never copied. Set `defaultProvider`/`defaultModel` manually. (The
+  `pi-cliproxyapi-provider` config template does carry `providerName` and
+  `baseUrl`, because the provider needs those to register at all.)
+- **`/preset remove` and `/preset add` do write `settings.json`** — only the
+  `packages[]` entry of this package, only its resource filters, and always with
+  a timestamped `.bak` first. Pi owns the rest of that file and may rewrite it
+  while running, so the backup matters. Nothing else in it is touched, and
+  `/reload` (or a restart) applies the change.
+- **Disabling a plugin is not uninstalling it.** Files stay in `node_modules` so
+  the operation is instant and reversible; see
+  [Disabling a bundled plugin](#disabling-a-bundled-plugin) for when to install
+  plugins individually instead.
+- **The read-only tool opt-out depends on load order.**
+  `no-readonly-tool-autoload.ts` must be auto-discovered from the agent dir's
+  `extensions/`, not registered through `pi.extensions`; moving it into the
+  package would make `@nguyenquangthai/pi-omp-theme` win the race and force
+  `grep`/`find`/`ls` back on.
 - **Peer dependencies.** Plugins declare peer deps on `@earendil-works/pi-*`,
   which pi bundles and aliases at load time. Installs therefore use
   `--legacy-peer-deps`; nothing needs to be installed for them.

@@ -31,6 +31,7 @@ import {
 	PACKAGE_ROOT,
 	findPiModule,
 	manifestExtensionEntries,
+	manifestThemeEntries,
 	readPackageJson,
 } from "./pi-package-lib.mjs";
 
@@ -50,6 +51,7 @@ function problem(message) {
 const npm = process.env.PI_NPM_COMMAND ?? "npm";
 const manifest = readPackageJson();
 const declared = manifestExtensionEntries();
+const declaredThemes = manifestThemeEntries();
 const workDir = mkdtempSync(join(tmpdir(), "pi-tarball-"));
 
 /** Thrown after a problem() call so the report is not duplicated in the catch. */
@@ -108,6 +110,16 @@ try {
 		ok(`all ${declared.length} pi.extensions entries are contained in the tarball`);
 	}
 
+	// Bundled themes are easy to lose in a tarball: they live under a plugin's
+	// assets directory, and the manifest has to list them explicitly.
+	const missingThemes = declaredThemes.filter((entry) => !existsSync(join(installedRoot, entry)));
+	if (missingThemes.length > 0) {
+		problem(`${missingThemes.length} pi.themes entry/entries missing from the tarball`);
+		for (const entry of missingThemes.slice(0, 10)) console.log(`      ${entry}`);
+	} else {
+		ok(`all ${declaredThemes.length} pi.themes entries are contained in the tarball`);
+	}
+
 	// ------------------------------------------------- 3. pi resolve + load
 
 	heading("3. resolve and load through pi");
@@ -140,6 +152,13 @@ try {
 			ok(`pi resolved ${extensions.length} extensions from the installed tarball`);
 		}
 
+		const resolvedThemes = resolved.themes.filter((resource) => resource.enabled);
+		if (resolvedThemes.length !== declaredThemes.length) {
+			problem(`pi resolved ${resolvedThemes.length} themes, expected ${declaredThemes.length}`);
+		} else {
+			ok(`pi resolved ${resolvedThemes.length} themes from the installed tarball`);
+		}
+
 		// A path outside the package root means npm hoisted a plugin instead of
 		// bundling it, which is exactly the failure this script exists to catch.
 		const outside = extensions.filter((resource) => !resource.path.startsWith(installedRoot));
@@ -165,7 +184,8 @@ try {
 		}
 
 		// The bundled /preset command has to survive packaging too; without it the
-		// config templates shipped in config/ would be unreachable.
+		// config templates shipped in config/ would be unreachable, and so would
+		// per-plugin enable/disable.
 		if (result.extensions.some((extension) => extension.commands.has("preset"))) {
 			ok("/preset command is registered");
 		} else {
@@ -176,6 +196,39 @@ try {
 			for (const extension of result.extensions) {
 				console.log(`      ${relative(installedRoot, extension.resolvedPath ?? extension.path)}`);
 			}
+		}
+
+		// ------------------------------------------------ 4. plugin filters
+
+		heading("4. /preset remove against an npm-installed copy");
+
+		// The filter is written relative to the package root, so it has to keep
+		// working when pi installed the package from the registry instead of
+		// pointing at a checkout — that is the arrangement every user has.
+		// Never `extensions/preset.ts`: /preset refuses to disable itself, so the test
+		// uses a bundled plugin the command would really accept.
+		const victim = declared.find((entry) => entry.startsWith("node_modules/")) ?? declared[0];
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			`${JSON.stringify(
+				{ packages: [{ source: `npm:${manifest.name}`, extensions: [`-${victim}`] }] },
+				null,
+				2,
+			)}\n`,
+			"utf-8",
+		);
+
+		await settingsManager.reload();
+		const filtered = await manager.resolve();
+		const survives = filtered.extensions.some(
+			(resource) => resource.enabled && relative(installedRoot, resource.path) === victim,
+		);
+		if (survives) {
+			problem(`pi still loads ${victim} after a -path filter, when installed from the registry`);
+		} else if (filtered.extensions.filter((resource) => resource.enabled).length !== extensions.length - 1) {
+			problem("a single -path filter changed the enabled extension count by more than one");
+		} else {
+			ok(`pi drops ${victim} and keeps the rest (npm: source, filter relative to the package root)`);
 		}
 	}
 } catch (error) {

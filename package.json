@@ -1,8 +1,8 @@
 {
   "name": "samrito-pi-preset",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "type": "module",
-  "description": "Portable pi agent setup: bundles the extension collection and user config templates so another machine can be brought up with one install.",
+  "description": "Portable pi agent setup: bundles the plugin collection and user config templates so another machine can be brought up with one install, with per-plugin disable/enable from the /preset command.",
   "keywords": [
     "pi-package",
     "pi-extensions"
@@ -29,16 +29,20 @@
   "pi": {
     "extensions": [
       "extensions/preset.ts",
+      "node_modules/@gotgenes/pi-permission-system/src/index.ts",
       "node_modules/@gotgenes/pi-subagents/src/index.ts",
       "node_modules/@juicesharp/rpiv-ask-user-question/index.ts",
       "node_modules/@juicesharp/rpiv-todo/index.ts",
       "node_modules/@narumitw/pi-btw/dist/index.ts",
+      "node_modules/@nguyenquangthai/pi-omp-theme/dist/extensions/pi-omp-theme.ts",
+      "node_modules/@sakiko233/pi-background-tasks/extensions/background-tasks.ts",
       "node_modules/@samrito/pi-cliproxyapi-provider/extensions/index.ts",
-      "node_modules/pi-background-tasks/extensions/anthropic-attribution.ts",
-      "node_modules/pi-background-tasks/extensions/background-tasks.ts",
-      "node_modules/pi-goal-x/extensions/goal.ts",
-      "node_modules/pi-tool-display/index.ts",
-      "node_modules/pi-zentui/extensions/zentui/index.ts"
+      "node_modules/pi-context-view/src/index.ts",
+      "node_modules/pi-goal-x/extensions/goal.ts"
+    ],
+    "themes": [
+      "node_modules/@nguyenquangthai/pi-omp-theme/themes/titanium-light.json",
+      "node_modules/@nguyenquangthai/pi-omp-theme/themes/titanium.json"
     ]
   },
   "scripts": {
@@ -50,25 +54,27 @@
     "prepack": "node scripts/sync-manifest.mjs --check"
   },
   "dependencies": {
-    "@gotgenes/pi-subagents": "^21.6.0",
-    "@juicesharp/rpiv-ask-user-question": "^2.9.0",
-    "@juicesharp/rpiv-todo": "^2.9.0",
+    "@gotgenes/pi-permission-system": "^32.0.2",
+    "@gotgenes/pi-subagents": "^21.7.0",
+    "@juicesharp/rpiv-ask-user-question": "^2.10.1",
+    "@juicesharp/rpiv-todo": "^2.10.1",
     "@narumitw/pi-btw": "^0.58.1",
+    "@nguyenquangthai/pi-omp-theme": "^1.0.12",
+    "@sakiko233/pi-background-tasks": "^3.1.0",
     "@samrito/pi-cliproxyapi-provider": "^0.16.0",
-    "pi-background-tasks": "^2.5.0",
-    "pi-goal-x": "^0.31.2",
-    "pi-tool-display": "^0.5.0",
-    "pi-zentui": "^0.23.0"
+    "pi-context-view": "^0.5.2",
+    "pi-goal-x": "^0.31.2"
   },
   "bundledDependencies": [
+    "@gotgenes/pi-permission-system",
     "@gotgenes/pi-subagents",
     "@juicesharp/rpiv-ask-user-question",
     "@juicesharp/rpiv-todo",
     "@narumitw/pi-btw",
+    "@nguyenquangthai/pi-omp-theme",
+    "@sakiko233/pi-background-tasks",
     "@samrito/pi-cliproxyapi-provider",
-    "pi-background-tasks",
-    "pi-goal-x",
-    "pi-tool-display",
-    "pi-zentui"
+    "pi-context-view",
+    "pi-goal-x"
   ]
 }

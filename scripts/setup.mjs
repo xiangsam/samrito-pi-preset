@@ -28,9 +28,10 @@ import {
 	PACKAGE_ROOT,
 	bundledPackageNames,
 	collectExtensionFiles,
+	collectThemeFiles,
 	findSettingsConflicts,
 	manifestExtensionEntries,
-	packageEntryNpmName,
+	manifestThemeEntries,
 	readJson,
 	relativeToPackage,
 	resolveAgentDir,
@@ -101,26 +102,31 @@ step("2. Manifest");
 // Plugin manifests change between versions, and pi's loader imports
 // pi.extensions entries verbatim (a directory entry fails to load), so the
 // entry list is regenerated from the installed tree instead of hand-maintained.
+// pi.themes is regenerated for a different reason: declaring any `pi` manifest
+// disables convention-directory discovery for every resource type, so bundled
+// themes must be listed explicitly or they are silently never loaded.
 try {
 	const output = execFileSync(process.execPath, [join(PACKAGE_ROOT, "scripts", "sync-manifest.mjs")], {
 		cwd: PACKAGE_ROOT,
 		encoding: "utf-8",
 	});
-	const count = manifestExtensionEntries().length;
-	ok(`pi.extensions regenerated (${count} entries)`);
-	if (count === 0) fail("pi.extensions is empty after regeneration");
+	const extensionCount = manifestExtensionEntries().length;
+	const themeCount = manifestThemeEntries().length;
+	ok(`pi manifest regenerated (${extensionCount} extensions, ${themeCount} themes)`);
+	if (extensionCount === 0) fail("pi.extensions is empty after regeneration");
 	for (const line of output.split("\n").filter((line) => line.trim().startsWith("node_modules/"))) {
 		console.log(`      ${line.trim()}`);
 	}
 } catch (error) {
-	fail(`could not regenerate pi.extensions: ${String(error.stderr ?? error.message).trim()}`);
+	fail(`could not regenerate the pi manifest: ${String(error.stderr ?? error.message).trim()}`);
 }
 
 // ------------------------------------------------------------- 3. resolution
 
-step("3. Extension resolution");
+step("3. Resource resolution");
 
-const entries = manifestExtensionEntries();
+const extensions = manifestExtensionEntries();
+const themes = manifestThemeEntries();
 const resolvedPlugins = new Map();
 
 for (const name of dependencyNames) {
@@ -131,20 +137,26 @@ for (const name of dependencyNames) {
 		continue;
 	}
 	resolvedPlugins.set(name, files);
-	ok(`${name} → ${files.length} extension file${files.length === 1 ? "" : "s"}`);
+	const themeFiles = collectThemeFiles(root);
+	const themeNote = themeFiles.length > 0 ? `, ${themeFiles.length} theme file(s)` : "";
+	ok(`${name} → ${files.length} extension file${files.length === 1 ? "" : "s"}${themeNote}`);
 }
 
-for (const entry of entries) {
+for (const entry of extensions) {
 	const absolute = join(PACKAGE_ROOT, entry);
 	if (!existsSync(absolute)) {
 		fail(`${entry} is missing`);
 	} else if (statSync(absolute).isDirectory()) {
-		fail(`${entry} is a directory; pi cannot import it`);
+		fail(`${entry} is a directory; pi's loader imports extension paths directly and cannot handle it`);
 	}
 }
 
+for (const entry of themes) {
+	if (!existsSync(join(PACKAGE_ROOT, entry))) fail(`theme ${entry} is missing`);
+}
+
 for (const excluded of EXCLUDED_PACKAGES) {
-	if (dependencyNames.includes(excluded) || entries.some((entry) => entry.includes(excluded))) {
+	if (dependencyNames.includes(excluded) || extensions.some((entry) => entry.includes(excluded))) {
 		fail(`excluded package ${excluded} is still declared`);
 	} else {
 		ok(`excluded as intended: ${excluded}`);
@@ -157,14 +169,19 @@ step("4. User configuration");
 
 const configCopies = [
 	{
-		from: join(PACKAGE_ROOT, "config", "zentui.json"),
-		to: join(agentDir, "zentui.json"),
-		label: "zentui.json",
+		from: join(PACKAGE_ROOT, "config", "pi-permission-system.config.json"),
+		to: join(agentDir, "extensions", "pi-permission-system", "config.json"),
+		label: "extensions/pi-permission-system/config.json",
 	},
 	{
-		from: join(PACKAGE_ROOT, "config", "pi-tool-display.config.json"),
-		to: join(agentDir, "extensions", "pi-tool-display", "config.json"),
-		label: "pi-tool-display/config.json",
+		from: join(PACKAGE_ROOT, "config", "pi-cliproxyapi-provider.config.json"),
+		to: join(agentDir, "pi-cliproxyapi-provider", "config.json"),
+		label: "pi-cliproxyapi-provider/config.json",
+	},
+	{
+		from: join(PACKAGE_ROOT, "config", "no-readonly-tool-autoload.ts"),
+		to: join(agentDir, "extensions", "no-readonly-tool-autoload.ts"),
+		label: "extensions/no-readonly-tool-autoload.ts",
 	},
 ];
 
@@ -235,7 +252,7 @@ if (!settings) {
 
 step("Summary");
 
-console.log(`  plugins:   ${resolvedPlugins.size} resolved, ${entries.length} extension files`);
+console.log(`  plugins:   ${resolvedPlugins.size} resolved, ${extensions.length} extensions, ${themes.length} themes`);
 console.log(`  agent dir: ${agentDir}`);
 console.log(`  package:   ${PACKAGE_ROOT}`);
 

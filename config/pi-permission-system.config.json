@@ -1,0 +1,10 @@
+{
+  "permission": {
+    "*": "allow",
+    "bash": {
+      "*": "allow",
+      "rm *": "ask",
+      "sudo *": "ask"
+    }
+  }
+}

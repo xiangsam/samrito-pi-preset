@@ -1,5 +1,6 @@
 /**
- * /preset — apply this package's config templates to the pi agent dir.
+ * /preset — apply this package's config templates, and enable/disable the
+ * plugins it bundles.
  *
  * Why a command rather than an npm install hook:
  *
@@ -12,18 +13,43 @@
  *   3. A command is explicit, re-runnable, and can diff before it overwrites.
  *
  * The templates live in this package under `config/`; the targets are files in
- * the pi agent dir that pi-zentui and pi-tool-display read at startup. Nothing
- * is written unless the user asks for it.
+ * the pi agent dir that the bundled plugins read at startup. Nothing is written
+ * unless the user asks for it.
+ *
+ * Why plugins are disabled with a settings filter rather than deleted:
+ *
+ *   Bundled plugins are not pi packages in their own right — they live inside
+ *   this package's node_modules and have no `packages[]` entry of their own, so
+ *   `pi remove npm:<plugin>` cannot address them, and deleting their files only
+ *   lasts until the next `npm install` restores them. The one mechanism that
+ *   survives updates is pi's own package filter: a `-relative/path` entry in
+ *   this package's `packages[]` entry, resolved relative to the package root.
+ *   `/preset remove` writes those, `/preset add` drops them again, and both
+ *   leave the files on disk so a re-add is instant. `pi config` edits the same
+ *   array, so the two never disagree about the resulting state.
+ *
+ *   The filter is read from and written by `scripts/pi-package-lib.mjs`, the
+ *   same module the verification scripts use, so the writer and the reader
+ *   cannot drift apart.
  */
 
-import { copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { CONFIG_DIR_NAME, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import {
+	BUNDLED_RESOURCE_TYPES,
+	PACKAGE_ROOT,
+	applyPluginFilter,
+	bundledPlugins,
+	findOwnPackageEntry,
+	pluginState,
+	readJson,
+	readPackageJson,
+} from "../scripts/pi-package-lib.mjs";
 
-/** Package root: this file lives in <root>/extensions/. */
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+// --------------------------------------------------------------- templates
 
 interface PresetFile {
 	/** Stable id used on the command line. */
@@ -32,27 +58,43 @@ interface PresetFile {
 	template: string;
 	/** Destination, resolved against the pi agent dir at run time. */
 	target: (agentDir: string) => string;
-	/** Which extension consumes it. */
+	/** Which bundled plugin consumes it. */
 	owner: string;
 }
 
+/**
+ * Order matters only for the summary: permission rules first, then the provider
+ * endpoint, then the tool-surface opt-out.
+ */
 const PRESET_FILES: PresetFile[] = [
 	{
-		id: "zentui",
-		template: join(PACKAGE_ROOT, "config", "zentui.json"),
-		target: (agentDir) => join(agentDir, "zentui.json"),
-		owner: "pi-zentui",
+		id: "permission-system",
+		template: join(PACKAGE_ROOT, "config", "pi-permission-system.config.json"),
+		target: (agentDir) => join(agentDir, "extensions", "pi-permission-system", "config.json"),
+		owner: "@gotgenes/pi-permission-system",
 	},
 	{
-		id: "tool-display",
-		template: join(PACKAGE_ROOT, "config", "pi-tool-display.config.json"),
-		target: (agentDir) => join(agentDir, "extensions", "pi-tool-display", "config.json"),
-		owner: "pi-tool-display",
+		id: "cliproxyapi",
+		template: join(PACKAGE_ROOT, "config", "pi-cliproxyapi-provider.config.json"),
+		target: (agentDir) => join(agentDir, "pi-cliproxyapi-provider", "config.json"),
+		owner: "@samrito/pi-cliproxyapi-provider",
+	},
+	{
+		id: "no-readonly-tools",
+		template: join(PACKAGE_ROOT, "config", "no-readonly-tool-autoload.ts"),
+		target: (agentDir) => join(agentDir, "extensions", "no-readonly-tool-autoload.ts"),
+		owner: "@nguyenquangthai/pi-omp-theme",
 	},
 ];
 
 type FileState = "missing" | "identical" | "differs" | "no-template";
 
+function shortPath(path: string): string {
+	const home = process.env.HOME;
+	return home && path.startsWith(`${home}/`) ? `~${path.slice(home.length)}` : path;
+}
+
+/** Compare by content, so a rewrite that changes nothing is not reported as one. */
 function stateOf(file: PresetFile, agentDir: string): FileState {
 	if (!existsSync(file.template)) return "no-template";
 	const target = file.target(agentDir);
@@ -62,24 +104,6 @@ function stateOf(file: PresetFile, agentDir: string): FileState {
 	} catch {
 		return "differs";
 	}
-}
-
-function shortPath(path: string): string {
-	const home = process.env.HOME;
-	return home && path.startsWith(home) ? `~${path.slice(home.length)}` : path;
-}
-
-function statusLine(file: PresetFile, agentDir: string): string {
-	const state = stateOf(file, agentDir);
-	const suffix =
-		state === "missing"
-			? "not present — will be created"
-			: state === "identical"
-				? "up to date"
-				: state === "differs"
-					? "differs from template — only replaced with --force"
-					: "template missing from package";
-	return `${state.padEnd(11)} ${file.id.padEnd(13)} ${relative(PACKAGE_ROOT, file.template)}`;
 }
 
 interface ApplyResult {
@@ -128,25 +152,189 @@ const ACTION_TEXT: Record<ApplyResult["action"], string> = {
 function summarize(results: ApplyResult[]): string {
 	return results
 		.map((result) => {
-			const detail = result.error ? ` — ${result.error}` : result.backup ? ` — backup ${shortPath(result.backup)}` : "";
+			const detail = result.error
+				? ` — ${result.error}`
+				: result.backup
+					? ` — backup ${shortPath(result.backup)}`
+					: "";
 			return `${ACTION_TEXT[result.action]} ${result.id}${detail}`;
 		})
 		.join("\n");
 }
 
+function statusLine(file: PresetFile, agentDir: string): string {
+	const label =
+		file.id === "no-readonly-tools" ? `no-readonly-tools (${file.owner} opt-out)` : `${file.id} (${file.owner})`;
+	switch (stateOf(file, agentDir)) {
+		case "identical":
+			return `✓ ${label}`;
+		case "differs":
+			return `~ ${label} — differs, /preset apply --force overwrites (keeps .bak)`;
+		case "missing":
+			return `· ${label} — not applied yet`;
+		default:
+			return `! ${label} — template missing from the package`;
+	}
+}
+
+// ------------------------------------------------------------- plugin state
+
+/** `[x] name — 1 extension, 2 themes` for every bundled plugin. */
+function pluginLines(agentDir: string, cwd: string): string[] {
+	const scope = resolveSettingsScope(agentDir, cwd);
+	const plugins = bundledPlugins();
+	const entry = scope?.entry;
+
+	return plugins.map((plugin) => {
+		const state = entry ? pluginState(entry, plugin) : "loading";
+		const counts = BUNDLED_RESOURCE_TYPES.map((type) => {
+			const count = plugin[type]?.length ?? 0;
+			return count === 0 ? undefined : `${count} ${count === 1 ? type.slice(0, -1) : type}`;
+		}).filter(Boolean);
+		const missing = plugin.extensions.every((path) => !existsSync(join(PACKAGE_ROOT, path)));
+
+		const mark = missing ? "!" : state === "disabled" ? " " : state === "partial" ? "~" : "x";
+		const notes = [];
+		if (state === "disabled") notes.push("disabled by settings.json filter");
+		if (state === "partial") notes.push("partially filtered, see settings.json");
+		if (missing) notes.push("files missing, run npm install in the package root");
+		const suffix = notes.length > 0 ? ` — ${notes.join("; ")}` : "";
+
+		return `[${mark}] ${plugin.name} — ${counts.join(", ")}${suffix}`;
+	});
+}
+
+interface SettingsScope {
+	/** "project" or "global", for the message shown to the user. */
+	label: string;
+	path: string;
+	entry: unknown;
+	packages: unknown[];
+}
+
+/**
+ * Find the settings.json that registers this package.
+ *
+ * Project settings win over global ones (pi's own precedence), so look there
+ * first; `pi install -l` puts the entry in `.pi/settings.json`.
+ */
+function resolveSettingsScope(agentDir: string, cwd: string): SettingsScope | undefined {
+	const candidates = [
+		{ label: "project", path: join(cwd, CONFIG_DIR_NAME, "settings.json") },
+		{ label: "global", path: join(agentDir, "settings.json") },
+	];
+
+	for (const candidate of candidates) {
+		const settings = readJson(candidate.path);
+		const packages = Array.isArray(settings?.packages) ? settings.packages : [];
+		const found = findOwnPackageEntry(packages);
+		if (found) {
+			return { label: candidate.label, path: candidate.path, entry: found.entry, packages };
+		}
+	}
+	return undefined;
+}
+
+function setPluginsEnabled(ctx: ExtensionCommandContext, names: string[], enabled: boolean): void {
+	const verb = enabled ? "add" : "remove";
+	const agentDir = getAgentDir();
+	const scope = resolveSettingsScope(agentDir, ctx.cwd);
+
+	if (!scope) {
+		ctx.ui.notify(
+			`preset: settings.json has no packages[] entry for ${readPackageJson().name}, so there is ` +
+				`nothing to filter.\nInstall it first: pi install npm:${readPackageJson().name}`,
+			"error",
+		);
+		return;
+	}
+
+	let result;
+	try {
+		result = applyPluginFilter({ packages: scope.packages, names, enabled });
+	} catch (error) {
+		ctx.ui.notify(`preset ${verb}: ${error instanceof Error ? error.message : String(error)}`, "error");
+		return;
+	}
+
+	const current = JSON.stringify(scope.packages);
+	const next = JSON.stringify(result.packages);
+	if (current === next) {
+		ctx.ui.notify(
+			`preset ${verb}: nothing to change — ${names.join(", ")} ${enabled ? "already load" : "already disabled"}`,
+			"info",
+		);
+		return;
+	}
+
+	const settings = readJson(scope.path);
+	const backup = `${scope.path}.bak-${timestamp()}`;
+	try {
+		copyFileSync(scope.path, backup);
+		writeFileSync(scope.path, `${JSON.stringify({ ...settings, packages: result.packages }, null, 2)}\n`, "utf-8");
+	} catch (error) {
+		ctx.ui.notify(
+			`preset ${verb}: could not write ${shortPath(scope.path)} — ` +
+				`${error instanceof Error ? error.message : String(error)}`,
+			"error",
+		);
+		return;
+	}
+
+	const detail = result.changes
+		.map((change) => `${change.files} ${change.type}`)
+		.join(", ");
+	ctx.ui.notify(
+		`preset ${verb}: ${names.join(", ")}\n` +
+			`${enabled ? "re-enabled" : "disabled"} ${detail} in ${scope.label} settings\n` +
+			`${shortPath(scope.path)} (backup ${shortPath(backup)})\n\n` +
+			"Files stay on disk; the filter is what stops pi loading them.\n" +
+			"Run /reload to apply now, or restart pi.",
+		"info",
+	);
+}
+
+function timestamp(): string {
+	return new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
+}
+
+// ---------------------------------------------------------------- command
+
 const USAGE = [
-	"/preset                 show status, then ask which configs to apply",
-	"/preset status          show status only",
-	"/preset apply           write configs that are missing (never overwrites)",
-	"/preset apply --force   write all configs, backing up what exists",
-	"/preset help            this message",
+	"/preset                        status, then ask which config templates to apply",
+	"/preset status                 config template + bundled plugin status",
+	"/preset apply [--force]        write config templates (--force overwrites, keeps .bak)",
+	"/preset list                   bundled plugins and whether they are disabled",
+	"/preset remove <plugin> [...]  stop loading bundled plugin(s)",
+	"/preset add <plugin> [...]     load them again",
+	"/preset help                   this message",
 ].join("\n");
 
-async function runStatus(ctx: ExtensionCommandContext, agentDir: string): Promise<void> {
+function parseArgs(args: string): string[] {
+	return args
+		.trim()
+		.split(/[\s,]+/)
+		.filter(Boolean);
+}
+
+function runStatus(ctx: ExtensionCommandContext, agentDir: string): void {
 	const lines = PRESET_FILES.map((file) => statusLine(file, agentDir));
 	const pending = PRESET_FILES.filter((file) => stateOf(file, agentDir) === "missing").length;
-	ctx.ui.notify(`agent dir: ${shortPath(agentDir)}\n${lines.join("\n")}\n\n${USAGE}`, "info");
-	if (pending === 0) ctx.ui.notify("preset: all configs already present", "info");
+	ctx.ui.notify(
+		`agent dir: ${shortPath(agentDir)}\n${lines.join("\n")}\n\n${pending === 0 ? "all configs applied" : `${pending} config(s) not applied`}\n\n${USAGE}`,
+		"info",
+	);
+}
+
+function runPluginList(ctx: ExtensionCommandContext, agentDir: string): void {
+	const lines = pluginLines(agentDir, ctx.cwd);
+	const disabled = lines.filter((line) => line.startsWith("[ ")).length;
+	ctx.ui.notify(
+		`bundled plugins: ${lines.length}, disabled: ${disabled}\n` +
+			`[x] loading  [ ] disabled  [~] partially filtered  [!] files missing\n\n` +
+			`${lines.join("\n")}\n\n/preset remove <plugin>   /preset add <plugin>`,
+		"info",
+	);
 }
 
 async function runInteractive(ctx: ExtensionCommandContext, agentDir: string): Promise<void> {
@@ -187,50 +375,88 @@ async function runInteractive(ctx: ExtensionCommandContext, agentDir: string): P
 	}
 
 	ctx.ui.notify(`preset:\n${summarize(results)}`, results.some((r) => r.action === "failed") ? "error" : "info");
-	if (force) ctx.ui.notify("preset: restart pi to pick up the new configs", "info");
+	if (force) ctx.ui.notify("preset: restart pi (or /reload) to pick up the new configs", "info");
+}
+
+function pluginCompletions(prefix: string): { value: string; label: string }[] | null {
+	const matches = bundledPlugins()
+		.flatMap((plugin) => [plugin.name, plugin.name.split("/").pop() ?? plugin.name])
+		.filter((name) => name.startsWith(prefix));
+	return matches.length > 0 ? [...new Set(matches)].map((value) => ({ value, label: value })) : null;
 }
 
 export default function (pi: ExtensionAPI): void {
-	const parseArgs = (args: string) => args.trim().split(/\s+/).filter(Boolean);
+	const subcommands = ["status", "list", "apply", "remove", "add", "help"];
 
 	pi.registerCommand("preset", {
-		description: "Apply this package's config templates (zentui, tool display) to the pi agent dir",
+		description: "Apply this package's config templates and enable/disable its bundled plugins",
 		getArgumentCompletions: (prefix) => {
-			const options = ["status", "apply", "apply --force", "help"];
-			const matches = options.filter((option) => option.startsWith(prefix));
-			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+			const trimmed = prefix.trimStart();
+			const spaceIndex = trimmed.search(/\s/);
+			if (spaceIndex === -1) {
+				const matches = [...subcommands, "apply --force"].filter((option) => option.startsWith(trimmed));
+				return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+			}
+			const [subcommand, ...rest] = trimmed.split(/\s+/);
+			if (subcommand !== "remove" && subcommand !== "add") return null;
+			return pluginCompletions(rest[rest.length - 1] ?? "");
 		},
 		handler: async (args, ctx) => {
 			const agentDir = getAgentDir();
 			const [subcommand, ...rest] = parseArgs(args);
 			const force = rest.includes("--force") || subcommand === "force";
+			const names = rest.filter((value) => !value.startsWith("--"));
 
 			try {
-				if (subcommand === "help") {
-					ctx.ui.notify(USAGE, "info");
-					return;
+				switch (subcommand) {
+					case undefined:
+						if (!ctx.hasUI) {
+							runStatus(ctx, agentDir);
+							return;
+						}
+						await runInteractive(ctx, agentDir);
+						return;
+					case "help":
+						ctx.ui.notify(USAGE, "info");
+						return;
+					case "status":
+						runStatus(ctx, agentDir);
+						return;
+					case "list":
+						runPluginList(ctx, agentDir);
+						return;
+					case "apply":
+					case "force": {
+						const results = PRESET_FILES.map((file) => applyFile(file, agentDir, force));
+						ctx.ui.notify(
+							`preset:\n${summarize(results)}`,
+							results.some((result) => result.action === "failed") ? "error" : "info",
+						);
+						if (results.some((result) => result.action === "updated")) {
+							ctx.ui.notify("preset: restart pi (or /reload) to pick up the new configs", "info");
+						}
+						return;
+					}
+					case "remove":
+					case "disable":
+						if (names.length === 0) {
+							ctx.ui.notify(`preset remove: name at least one plugin\n\n${USAGE}`, "warning");
+							return;
+						}
+						setPluginsEnabled(ctx, names, false);
+						return;
+					case "add":
+					case "enable":
+						if (names.length === 0) {
+							ctx.ui.notify(`preset add: name at least one plugin\n\n${USAGE}`, "warning");
+							return;
+						}
+						setPluginsEnabled(ctx, names, true);
+						return;
+					default:
+						ctx.ui.notify(`preset: unknown argument "${subcommand}"\n\n${USAGE}`, "warning");
+						return;
 				}
-				if (subcommand === "status") {
-					await runStatus(ctx, agentDir);
-					return;
-				}
-				if (subcommand === "apply" || subcommand === "force") {
-					const results = PRESET_FILES.map((file) => applyFile(file, agentDir, force));
-					ctx.ui.notify(
-						`preset:\n${summarize(results)}`,
-						results.some((result) => result.action === "failed") ? "error" : "info",
-					);
-					return;
-				}
-				if (subcommand !== undefined) {
-					ctx.ui.notify(`preset: unknown argument "${subcommand}"\n${USAGE}`, "warning");
-					return;
-				}
-				if (!ctx.hasUI) {
-					await runStatus(ctx, agentDir);
-					return;
-				}
-				await runInteractive(ctx, agentDir);
 			} catch (error) {
 				ctx.ui.notify(`preset: ${error instanceof Error ? error.message : String(error)}`, "error");
 			}
