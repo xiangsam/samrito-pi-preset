@@ -7,6 +7,7 @@
  *   2. regenerate pi.extensions from the installed plugin tree
  *   3. confirm every plugin resolves to concrete, loadable extension files
  *   4. copy user config templates into the pi agent dir when they are absent
+ *      (keybindings.json is merged instead, never overwritten)
  *   5. optionally drop conflicting plugin entries from settings.json
  *
  * Usage:
@@ -32,9 +33,12 @@ import {
 	findSettingsConflicts,
 	manifestExtensionEntries,
 	manifestThemeEntries,
+	missingToolAdditions,
+	planKeybindingPatch,
 	readJson,
 	relativeToPackage,
 	resolveAgentDir,
+	withToolAdditions,
 	withoutSettingsConflicts,
 } from "./pi-package-lib.mjs";
 
@@ -174,27 +178,49 @@ const configCopies = [
 		label: "extensions/pi-permission-system/config.json",
 	},
 	{
+		from: join(PACKAGE_ROOT, "config", "keybindings.json"),
+		to: join(agentDir, "keybindings.json"),
+		label: "keybindings.json",
+		// Patch, not copy: this file also holds the user's own bindings, so the
+		// conflict is resolved by freeing ctrl+b from tui.editor.cursorLeft and
+		// every other entry is carried over untouched.
+		mode: "keybindings",
+	},
+	{
 		from: join(PACKAGE_ROOT, "config", "pi-cliproxyapi-provider.config.json"),
 		to: join(agentDir, "pi-cliproxyapi-provider", "config.json"),
 		label: "pi-cliproxyapi-provider/config.json",
 	},
-	{
-		from: join(PACKAGE_ROOT, "config", "no-readonly-tool-autoload.ts"),
-		to: join(agentDir, "extensions", "no-readonly-tool-autoload.ts"),
-		label: "extensions/no-readonly-tool-autoload.ts",
-	},
 ];
 
-for (const { from, to, label } of configCopies) {
+for (const { from, to, label, mode } of configCopies) {
 	if (!existsSync(from)) {
 		warn(`template missing, skipped: ${relative(PACKAGE_ROOT, from)}`);
 		continue;
 	}
-	if (existsSync(to) && !forceConfig) {
-		ok(`${label} already present, kept as-is`);
-		continue;
-	}
 	try {
+		if (mode === "keybindings") {
+			// Deliberately ignores --force-config: overwriting the file wholesale
+			// would throw away bindings this bundle knows nothing about.
+			const plan = planKeybindingPatch(to);
+			if (!plan.changed) {
+				ok(`${label} already resolved, kept as-is`);
+				continue;
+			}
+			mkdirSync(dirname(to), { recursive: true });
+			if (plan.exists) {
+				copyFileSync(to, `${to}.bak`);
+				warn(`${label} merged (backup: ${to}.bak)`);
+			}
+			writeFileSync(to, plan.content, "utf-8");
+			ok(`${label} written to ${to} (patched: ${plan.actions.join(", ")})`);
+			continue;
+		}
+
+		if (existsSync(to) && !forceConfig) {
+			ok(`${label} already present, kept as-is`);
+			continue;
+		}
 		mkdirSync(dirname(to), { recursive: true });
 		if (existsSync(to)) {
 			copyFileSync(to, `${to}.bak`);
@@ -220,6 +246,10 @@ if (!settings) {
 	const packages = Array.isArray(settings.packages) ? settings.packages : [];
 	const conflicts = findSettingsConflicts(settings, resolvedPlugins.keys(), EXCLUDED_PACKAGES);
 
+	// Every change below lands in the same file, so they are applied to one object
+	// and written once. Two writes would leave only the second one's backup.
+	let next = settings;
+
 	if (conflicts.length === 0) {
 		ok("no conflicting plugin entries");
 	} else {
@@ -236,14 +266,31 @@ if (!settings) {
 			);
 			console.log("      fix: node scripts/setup.mjs --migrate-settings");
 		} else {
-			try {
-				const next = withoutSettingsConflicts(packages, resolvedPlugins.keys(), EXCLUDED_PACKAGES);
-				copyFileSync(settingsPath, `${settingsPath}.bak`);
-				writeFileSync(settingsPath, `${JSON.stringify({ ...settings, packages: next }, null, 2)}\n`, "utf-8");
-				ok(`removed ${conflicts.length} entry/entries (backup: ${settingsPath}.bak)`);
-			} catch (error) {
-				fail(`could not rewrite settings.json: ${error.message}`);
-			}
+			next = {
+				...next,
+				packages: withoutSettingsConflicts(packages, resolvedPlugins.keys(), EXCLUDED_PACKAGES),
+			};
+			ok(`removes ${conflicts.length} duplicate entry/entries`);
+		}
+	}
+
+	// codemode is registered inactive; `+codemode` in defaultTools turns it on
+	// without replacing pi's default read/bash/edit/write surface.
+	const toolAdditions = missingToolAdditions(next);
+	if (toolAdditions.length === 0) {
+		ok("defaultTools already enables codemode");
+	} else {
+		next = withToolAdditions(next);
+		ok(`defaultTools += ${toolAdditions.join(", ")}`);
+	}
+
+	if (next !== settings) {
+		try {
+			copyFileSync(settingsPath, `${settingsPath}.bak`);
+			writeFileSync(settingsPath, `${JSON.stringify(next, null, 2)}\n`, "utf-8");
+			ok(`settings.json updated (backup: ${settingsPath}.bak)`);
+		} catch (error) {
+			fail(`could not rewrite settings.json: ${error.message}`);
 		}
 	}
 }

@@ -14,7 +14,7 @@ The plugins are packed into the tarball (`bundledDependencies`), so nothing is
 fetched from the registry at load time and no setup step is required. See
 [Publish and install from npm](#publish-and-install-from-npm).
 
-Config templates (permission rules, provider endpoint, tool-surface opt-out) and
+Config templates (permission rules, provider endpoint, codemode) and
 per-plugin enable/disable are shipped but never applied behind your back — one
 slash command after the first restart:
 
@@ -41,16 +41,22 @@ pi install "$PWD"          # register with pi
 
 | Resource | Source | Notes |
 | --- | --- | --- |
-| Extensions | 10 npm plugins + `/preset`, 11 entry files | see [Bundled plugins](#bundled-plugins) |
+| Extensions | 11 npm plugins + `/preset`, 12 entry files | see [Bundled plugins](#bundled-plugins) |
 | Themes | `@nguyenquangthai/pi-omp-theme`, 2 files | re-declared in `pi.themes`; a `pi` manifest disables theme discovery |
 | `config/pi-permission-system.config.json` | `~/.pi/agent/extensions/pi-permission-system/config.json` | permission rules |
 | `config/pi-cliproxyapi-provider.config.json` | `~/.pi/agent/pi-cliproxyapi-provider/config.json` | provider endpoint and auth |
-| `config/no-readonly-tool-autoload.ts` | `~/.pi/agent/extensions/no-readonly-tool-autoload.ts` | keeps `grep`/`find`/`ls` out of the tool set the theme forces on |
+| `config/keybindings.json` | `~/.pi/agent/keybindings.json` | frees `ctrl+b` for the background-tasks shortcut; **merged**, never overwritten |
+| `defaultTools` | `~/.pi/agent/settings.json` | adds `+codemode`; **merged** into the key, never replaces it |
 
-`no-readonly-tool-autoload.ts` deliberately lands in the agent dir's own
-`extensions/` directory rather than in `pi.extensions`: local auto-discovered
-extensions run **before** package extensions, and the file has to see the tool
-set pi started with in order to tell an opt-in from the theme's injection.
+`config/keybindings.json` and the `defaultTools` entry are merges rather than
+copies: both files also hold settings this package knows nothing about.
+
+`@nguyenquangthai/pi-omp-theme` no longer forces `grep`/`find`/`ls` into the
+active tool set — read-only tool activation is opt-in there
+(`piOmpTheme.readonlyTools`, default `false`) — so this bundle no longer ships
+the `no-readonly-tool-autoload.ts` workaround older versions needed. If you were
+running that file from the agent dir's `extensions/`, delete it; it is a no-op
+now.
 
 Personal skills under `~/.agents/skills/` are **not** bundled — keep those
 managed separately, or copy the directory to the target machine.
@@ -59,16 +65,17 @@ managed separately, or copy the directory to the target machine.
 
 | Plugin | Version | Files |
 | --- | --- | --- |
-| `@gotgenes/pi-permission-system` | ^32.0.2 | `src/index.ts` |
-| `@gotgenes/pi-subagents` | ^21.7.0 | `src/index.ts` |
-| `@juicesharp/rpiv-ask-user-question` | ^2.10.1 | `index.ts` |
-| `@juicesharp/rpiv-todo` | ^2.10.1 | `index.ts` |
-| `@narumitw/pi-btw` | ^0.58.1 | `dist/index.ts` |
-| `@nguyenquangthai/pi-omp-theme` | ^1.0.12 | `dist/extensions/pi-omp-theme.ts`, 2 themes |
+| `@gotgenes/pi-permission-system` | ^40.1.1 | `src/index.ts` |
+| `@gotgenes/pi-subagents` | ^23.2.0 | `src/index.ts` |
+| `@juicesharp/rpiv-ask-user-question` | ^2.12.0 | `index.ts` |
+| `@juicesharp/rpiv-todo` | ^2.12.0 | `index.ts` |
+| `@juicesharp/rpiv-web-tools` | ^2.12.0 | `index.ts` |
+| `@narumitw/pi-btw` | ^0.61.1 | `dist/index.ts` |
+| `@nguyenquangthai/pi-omp-theme` | ^1.0.15 | `dist/extensions/pi-omp-theme.ts`, 2 themes |
 | `@sakiko233/pi-background-tasks` | ^3.1.0 | `extensions/background-tasks.ts` |
 | `@samrito/pi-cliproxyapi-provider` | ^0.16.0 | `extensions/index.ts` |
-| `pi-context-view` | ^0.5.2 | `src/index.ts` |
-| `pi-goal-x` | ^0.31.2 | `extensions/goal.ts` |
+| `pi-context-view` | ^0.6.0 | `src/index.ts` |
+| `pi-goal-x` | ^0.32.3 | `extensions/goal.ts` |
 
 All packages here are bundled into the published tarball, so the target machine
 needs no registry access to load them (see [How it works](#how-it-works)).
@@ -76,6 +83,20 @@ needs no registry access to load them (see [How it works](#how-it-works)).
 `extensions/preset.ts` is this package's **own** extension. It ships the
 `/preset` command described below and registers no tools, so it never conflicts
 with the plugins it bundles.
+
+`@juicesharp/rpiv-web-tools` adds `web_search` and `web_fetch` plus the
+`/web-tools` command, and needs a search credential before `web_search` works.
+That credential is deliberately **not** a config template here: `/web-tools`
+writes `~/.config/rpiv-web-tools/config.json` (mode `0600`, or
+`$XDG_CONFIG_HOME/rpiv-web-tools/config.json`) holding per-provider API keys, so
+it is machine- and credential-specific like `auth.json`. Run `/web-tools` on the
+target machine to pick a backend and paste a key, or export the provider's own
+variable (for example `BRAVE_SEARCH_API_KEY`) — the environment wins over the
+file. `web_fetch` works with no key at all, and the self-hosted `searxng` and
+`ollama` backends need only a base URL. See the package's
+[Providers](https://github.com/juicesharp/rpiv-mono/blob/main/packages/rpiv-web-tools/docs/providers.md)
+doc for the per-backend variable names.
+
 ## Applying the config templates
 
 `config/` holds files that *other* extensions read from the pi agent dir at
@@ -95,9 +116,18 @@ command copies them on request:
 
 Bare `/preset` summarises each template (`missing` / `up to date` / `differs`)
 and offers a choice; `apply` never touches a file you edited, and `--force`
-keeps a `.bak` next to whatever it replaces. Until a template is applied, a
-one-line `/preset` hint is shown at session start (silence it with
-`SAMRITO_PRESET_QUIET=1`).
+keeps a `.bak` next to whatever it replaces. Two entries are merged rather than
+copied (see below), so even without `--force` they resolve their conflict and
+keep the rest of your file:
+
+- `keybindings.json` — drops the `ctrl+b` claim that collides with the
+  background-tasks shortcut.
+- `defaultTools` in `settings.json` — appends `+codemode`, which turns pi's
+  [codemode](https://pi.dev/docs/codemode) tool on for every session without
+  replacing the default `read`/`bash`/`edit`/`write` surface.
+
+Until a template is applied, a one-line `/preset` hint is shown at session
+start (silence it with `SAMRITO_PRESET_QUIET=1`).
 
 Scripted and CI use is still supported:
 
@@ -105,6 +135,63 @@ Scripted and CI use is still supported:
 node ~/.pi/agent/npm/node_modules/samrito-pi-preset/scripts/setup.mjs \
   --skip-install --force-config
 ```
+
+`--force-config` does not apply to `keybindings.json`: that file is always
+merged, never replaced wholesale, because it also holds bindings this package
+knows nothing about. The same is true of the `defaultTools` entry, which is
+merged into `settings.json` alongside whatever else that file holds.
+
+### Why `defaultTools` is merged, not replaced
+
+`codemode` is registered inactive by pi's built-in `builtin:codemode`
+extension, so the only way to switch it on is a `defaultTools` entry. A plain
+name list *replaces* pi's default `read`/`bash`/`edit`/`write` surface, so this
+bundle uses the additive form instead:
+
+```json
+{
+  "defaultTools": ["+codemode"]
+}
+```
+
+`/preset apply` and `setup.mjs` append `+codemode` only when the key does not
+already enable codemode (a plain `codemode` entry counts), preserving every
+other entry in the list. On a project that replaces `defaultTools` outright,
+add `+codemode` to that project list; the global entry cannot override a
+project's plain-name replacement.
+
+### Why `keybindings.json` is merged, not copied
+
+`@sakiko233/pi-background-tasks` registers `ctrl+b` for "move the most recent
+foreground bash command to the background". Pi's built-in
+`tui.editor.cursorLeft` ships with `["left", "ctrl+b"]`, so every start prints:
+
+```
+Extension shortcut conflict: 'ctrl+b' is built-in shortcut for tui.editor.cursorLeft
+and .../@sakiko233/pi-background-tasks/extensions/background-tasks.ts.
+Using .../background-tasks.ts.
+```
+
+`tui.editor.cursorLeft` is not one of pi's reserved keybindings, which means pi
+expects the *user* to resolve it: the conflict check runs against the resolved
+keybindings, so dropping `ctrl+b` from that action removes the built-in claim
+and the warning disappears. `config/keybindings.json` does exactly that:
+
+```json
+{
+  "tui.editor.cursorLeft": [
+    "left"
+  ]
+}
+```
+
+It is applied as a patch, per action: the released key is removed from
+`tui.editor.cursorLeft`, every other binding in your file is carried over
+untouched, and if you already moved `ctrl+b` somewhere else the file is left
+alone. The table driving it is `KEYBINDING_PATCHES` in
+`scripts/pi-package-lib.mjs`, and `verify.mjs` proves with pi's own
+`KeybindingsManager` + `ExtensionRunner` that the warnings are gone. After
+applying, `/reload` is enough — pi reloads `keybindings.json` on reload.
 
 ## Disabling a bundled plugin
 
@@ -366,8 +453,9 @@ pi list
 ```
 
 `setup.mjs` installs dependencies, regenerates the manifest, copies config
-templates it does not find, and **fails** if `settings.json` still lists any
-bundled plugin (see below). Add `--migrate-settings` to have it clean those up.
+templates it does not find, merges `+codemode` into `defaultTools`, and
+**fails** if `settings.json` still lists any bundled plugin (see below). Add
+`--migrate-settings` to have it clean those up.
 
 ### From a tarball
 
@@ -475,7 +563,7 @@ and it keeps working after the next update reinstates the files.
 | Script | Purpose |
 | --- | --- |
 | `extensions/preset.ts` | the bundled `/preset` command (config templates + per-plugin enable/disable) |
-| `scripts/setup.mjs` | install deps, regenerate manifest, copy configs, report conflicts |
+| `scripts/setup.mjs` | install deps, regenerate manifest, copy configs, merge `+codemode`, report conflicts |
 | `scripts/verify.mjs` | 6-stage check of the checkout: manifest, pi resolution, real loading, plugin filters, the `/preset` command, startup conflicts |
 | `scripts/verify-tarball.mjs` | packs the tarball, installs it, and loads it through pi — catches `bundledDependencies` drift |
 | `scripts/sync-manifest.mjs` | regenerate `pi.extensions` + `pi.themes` (`--check` for drift) |
@@ -488,11 +576,11 @@ and it keeps working after the next update reinstates the files.
 
 | Stage | Checks |
 | --- | --- |
-| 1. Manifest | entries exist, are files not directories, themes belong to a declared dependency, no excluded plugin declared, no drift, config templates present |
+| 1. Manifest | entries exist, are files not directories, themes belong to a declared dependency, no excluded plugin declared, no drift, config templates present, `config/keybindings.json` in sync with `KEYBINDING_PATCHES`, and the `defaultTools` merge appends `+codemode` exactly once |
 | 2. Resolution | pi's `DefaultPackageManager` resolves the bundle — extensions *and* themes — in a throwaway agent dir |
-| 3. Loading | pi's `loadExtensions()` imports every entry — the exact startup code path — and `/preset` is registered |
+| 3. Loading | pi's `loadExtensions()` imports every entry — the exact startup code path — and `/preset` is registered; the loaded shortcuts are then run through pi's own `ExtensionRunner.getShortcuts()` twice, with and without the keybindings patch, to prove the `ctrl+b` warning is gone |
 | 4. Plugin filters | the `packages[]` filter `/preset remove` writes really does disable exactly those plugins (extensions and themes), `/preset add` restores them, and removing `/preset` itself is refused |
-| 5. `/preset` command | drives the real command handler against a scratch agent dir: list/status/apply/apply --force/remove/add, plus the error paths (unknown plugin, missing name, unknown subcommand, no `packages[]` entry) |
+| 5. `/preset` command | drives the real command handler against a scratch agent dir: list/status/apply/apply --force/remove/add, plus the error paths (unknown plugin, missing name, unknown subcommand, no `packages[]` entry); the keybindings patch and the `defaultTools` merge are applied over pre-existing files and have to keep the user's other entries |
 | 6. Startup conflicts | bundled plugins still listed in `settings.json` while the bundle itself is installed (fatal — see below); a machine that installs the plugins individually instead gets a migration note, not a failure |
 
 Stage 3 deliberately uses `loadExtensions` rather than `discoverAndLoadExtensions`:
@@ -531,17 +619,20 @@ node scripts/setup.mjs [--skip-install] [--force-config]
 ## Caveats
 
 - **Config templates need one command.** pi loads extensions from the tarball,
-  but the permission rules, the provider endpoint, and the read-only tool opt-out
-  live in the agent dir. Run `/preset` (or `setup.mjs --skip-install
-  --force-config`) to apply them.
-- **Only those three templates are versioned.** They are plain files, so
-  `/preset apply` refuses to overwrite local edits; `--force` backs them up
-  first.
+  but the permission rules, the provider endpoint, the keybinding patch and the
+  `defaultTools` entry live in the agent dir. Run `/preset` (or `setup.mjs
+  --skip-install --force-config`) to apply them.
+- **Config templates are plain files, so `/preset apply` refuses to overwrite
+  local edits**; `--force` backs them up first. `keybindings.json` and the
+  `defaultTools` entry are the exception — they are merged, so they never need
+  `--force` and never lose entries they do not know about.
 - **Model/provider settings are not migrated.** `auth.json`, `models-store.json`,
   and provider defaults in `settings.json` are machine- and credential-specific
   and are never copied. Set `defaultProvider`/`defaultModel` manually. (The
   `pi-cliproxyapi-provider` config template does carry `providerName` and
-  `baseUrl`, because the provider needs those to register at all.)
+  `baseUrl`, because the provider needs those to register at all.) The same
+  applies to `~/.config/rpiv-web-tools/config.json`: it holds search API keys, so
+  run `/web-tools` on the target machine instead of copying it.
 - **`/preset remove` and `/preset add` do write `settings.json`** — only the
   `packages[]` entry of this package, only its resource filters, and always with
   a timestamped `.bak` first. Pi owns the rest of that file and may rewrite it
@@ -551,11 +642,12 @@ node scripts/setup.mjs [--skip-install] [--force-config]
   the operation is instant and reversible; see
   [Disabling a bundled plugin](#disabling-a-bundled-plugin) for when to install
   plugins individually instead.
-- **The read-only tool opt-out depends on load order.**
-  `no-readonly-tool-autoload.ts` must be auto-discovered from the agent dir's
-  `extensions/`, not registered through `pi.extensions`; moving it into the
-  package would make `@nguyenquangthai/pi-omp-theme` win the race and force
-  `grep`/`find`/`ls` back on.
+- **Read-only tools are opt-in in the theme.** `@nguyenquangthai/pi-omp-theme`
+  leaves pi's active tool set alone by default (`piOmpTheme.readonlyTools: false`),
+  so `grep`/`find`/`ls` stay off unless you ask for them. Older versions forced
+  them on, which is why this bundle used to ship a
+  `no-readonly-tool-autoload.ts` workaround; that file is obsolete and can be
+  deleted from the agent dir's `extensions/`.
 - **Peer dependencies.** Plugins declare peer deps on `@earendil-works/pi-*`,
   which pi bundles and aliases at load time. Installs therefore use
   `--legacy-peer-deps`; nothing needs to be installed for them.

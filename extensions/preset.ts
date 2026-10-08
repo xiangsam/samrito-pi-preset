@@ -44,9 +44,12 @@ import {
 	applyPluginFilter,
 	bundledPlugins,
 	findOwnPackageEntry,
+	missingToolAdditions,
 	pluginState,
+	planKeybindingPatch,
 	readJson,
 	readPackageJson,
+	withToolAdditions,
 } from "../scripts/pi-package-lib.mjs";
 
 // --------------------------------------------------------------- templates
@@ -60,11 +63,18 @@ interface PresetFile {
 	target: (agentDir: string) => string;
 	/** Which bundled plugin consumes it. */
 	owner: string;
+	/**
+	 * `copy` (default) replaces the target with the template; `keybindings`
+	 * merges the template's actions into the target instead, because that file
+	 * also holds bindings this package knows nothing about; `settings` writes a
+	 * key into a settings.json the user already owns, so only that key changes.
+	 */
+	mode?: "copy" | "keybindings" | "settings";
 }
 
 /**
  * Order matters only for the summary: permission rules first, then the provider
- * endpoint, then the tool-surface opt-out.
+ * endpoint, then the keybinding patch, then the `defaultTools` merge.
  */
 const PRESET_FILES: PresetFile[] = [
 	{
@@ -80,10 +90,23 @@ const PRESET_FILES: PresetFile[] = [
 		owner: "@samrito/pi-cliproxyapi-provider",
 	},
 	{
-		id: "no-readonly-tools",
-		template: join(PACKAGE_ROOT, "config", "no-readonly-tool-autoload.ts"),
-		target: (agentDir) => join(agentDir, "extensions", "no-readonly-tool-autoload.ts"),
-		owner: "@nguyenquangthai/pi-omp-theme",
+		// Frees ctrl+b from tui.editor.cursorLeft so @sakiko233/pi-background-tasks
+		// registers it without pi's "Extension shortcut conflict" warning.
+		id: "keybindings",
+		template: join(PACKAGE_ROOT, "config", "keybindings.json"),
+		target: (agentDir) => join(agentDir, "keybindings.json"),
+		owner: "@sakiko233/pi-background-tasks",
+		mode: "keybindings",
+	},
+	{
+		// Not a file template: `defaultTools` lives in a settings.json the user
+		// already owns, so only `"+codemode"` is merged in. `template` is a
+		// placeholder `stateOf` never reads for `settings` mode.
+		id: "default-tools",
+		template: join(PACKAGE_ROOT, "package.json"),
+		target: (agentDir) => join(agentDir, "settings.json"),
+		owner: "pi builtin:codemode",
+		mode: "settings",
 	},
 ];
 
@@ -96,14 +119,41 @@ function shortPath(path: string): string {
 
 /** Compare by content, so a rewrite that changes nothing is not reported as one. */
 function stateOf(file: PresetFile, agentDir: string): FileState {
-	if (!existsSync(file.template)) return "no-template";
 	const target = file.target(agentDir);
+	if (file.mode === "settings") {
+		// "differs" means "defaultTools does not enable codemode yet", not "the
+		// file disagrees with a template".
+		return missingToolAdditions(readJson(target) ?? {}).length > 0 ? "differs" : "identical";
+	}
+	if (!existsSync(file.template)) return "no-template";
+	if (file.mode === "keybindings") {
+		// "differs" here means "the patch still has work to do", not "the file
+		// disagrees with the template": other actions in it are expected to differ.
+		try {
+			return planKeybindingPatch(target).changed ? "differs" : "identical";
+		} catch {
+			return "differs";
+		}
+	}
 	if (!existsSync(target)) return "missing";
 	try {
 		return readFileSync(file.template, "utf-8") === readFileSync(target, "utf-8") ? "identical" : "differs";
 	} catch {
 		return "differs";
 	}
+}
+
+/**
+ * Whether `/preset apply` may touch this file without --force.
+ *
+ * A keybindings patch and the `defaultTools` merge are additive by
+ * construction (they only edit the actions in KEYBINDING_PATCHES, or append a
+ * missing `+name`), so unlike the copy templates they are applied as soon as
+ * there is something to do.
+ */
+function appliesWithoutForce(file: PresetFile, state: FileState): boolean {
+	if (state === "missing") return true;
+	return state === "differs" && (file.mode === "keybindings" || file.mode === "settings");
 }
 
 interface ApplyResult {
@@ -120,7 +170,27 @@ function applyFile(file: PresetFile, agentDir: string, force: boolean): ApplyRes
 
 	if (state === "no-template") return { id: file.id, action: "skipped", target };
 	if (state === "identical") return { id: file.id, action: "kept", target };
-	if (state === "differs" && !force) return { id: file.id, action: "kept", target };
+	if (state === "differs" && !force && !appliesWithoutForce(file, state)) return { id: file.id, action: "kept", target };
+
+	// The keybindings template is a patch, not a replacement: the target also
+	// holds bindings this package knows nothing about. `content` is what
+	// planKeybindingPatch() computed for the file on disk plus the patch, so an
+	// existing file keeps every one of its own entries.
+	let content: string | undefined;
+	if (file.mode === "keybindings") {
+		try {
+			content = planKeybindingPatch(target).content;
+		} catch (error) {
+			return {
+				id: file.id,
+				action: "failed",
+				target,
+				error: error instanceof Error ? error.message : String(error),
+			};
+		}
+	} else if (file.mode === "settings") {
+		content = `${JSON.stringify(withToolAdditions(readJson(target) ?? {}), null, 2)}\n`;
+	}
 
 	try {
 		mkdirSync(dirname(target), { recursive: true });
@@ -129,7 +199,8 @@ function applyFile(file: PresetFile, agentDir: string, force: boolean): ApplyRes
 			backup = `${target}.bak`;
 			copyFileSync(target, backup);
 		}
-		copyFileSync(file.template, target);
+		if (content === undefined) copyFileSync(file.template, target);
+		else writeFileSync(target, content, "utf-8");
 		return { id: file.id, action: state === "missing" ? "created" : "updated", target, backup };
 	} catch (error) {
 		return {
@@ -163,12 +234,17 @@ function summarize(results: ApplyResult[]): string {
 }
 
 function statusLine(file: PresetFile, agentDir: string): string {
-	const label =
-		file.id === "no-readonly-tools" ? `no-readonly-tools (${file.owner} opt-out)` : `${file.id} (${file.owner})`;
+	const label = `${file.id} (${file.owner})`;
 	switch (stateOf(file, agentDir)) {
 		case "identical":
 			return `✓ ${label}`;
 		case "differs":
+			if (file.mode === "keybindings") {
+				return `~ ${label} — ctrl+b still bound, /preset apply frees it (keeps .bak)`;
+			}
+			if (file.mode === "settings") {
+				return `~ ${label} — /preset apply adds "+codemode" to settings.json (keeps .bak)`;
+			}
 			return `~ ${label} — differs, /preset apply --force overwrites (keeps .bak)`;
 		case "missing":
 			return `· ${label} — not applied yet`;
@@ -303,7 +379,7 @@ function timestamp(): string {
 const USAGE = [
 	"/preset                        status, then ask which config templates to apply",
 	"/preset status                 config template + bundled plugin status",
-	"/preset apply [--force]        write config templates (--force overwrites, keeps .bak)",
+	"/preset apply [--force]        write config templates (keybindings.json and defaultTools are merged)",
 	"/preset list                   bundled plugins and whether they are disabled",
 	"/preset remove <plugin> [...]  stop loading bundled plugin(s)",
 	"/preset add <plugin> [...]     load them again",
@@ -319,7 +395,7 @@ function parseArgs(args: string): string[] {
 
 function runStatus(ctx: ExtensionCommandContext, agentDir: string): void {
 	const lines = PRESET_FILES.map((file) => statusLine(file, agentDir));
-	const pending = PRESET_FILES.filter((file) => stateOf(file, agentDir) === "missing").length;
+	const pending = PRESET_FILES.filter((file) => appliesWithoutForce(file, stateOf(file, agentDir))).length;
 	ctx.ui.notify(
 		`agent dir: ${shortPath(agentDir)}\n${lines.join("\n")}\n\n${pending === 0 ? "all configs applied" : `${pending} config(s) not applied`}\n\n${USAGE}`,
 		"info",
@@ -338,25 +414,29 @@ function runPluginList(ctx: ExtensionCommandContext, agentDir: string): void {
 }
 
 async function runInteractive(ctx: ExtensionCommandContext, agentDir: string): Promise<void> {
-	const missing = PRESET_FILES.filter((file) => stateOf(file, agentDir) === "missing");
-	const differing = PRESET_FILES.filter((file) => stateOf(file, agentDir) === "differs");
-	const identical = PRESET_FILES.length - missing.length - differing.length;
+	// "pending" is what /preset apply would write without --force: a missing copy
+	// template, or a keybindings patch that still has work to do. "overwrites" is
+	// what only --force touches, i.e. a copy template whose content differs.
+	const states = PRESET_FILES.map((file) => ({ file, state: stateOf(file, agentDir) }));
+	const pending = states.filter(({ file, state }) => appliesWithoutForce(file, state));
+	const overwrites = states.filter(({ file, state }) => state === "differs" && !appliesWithoutForce(file, state));
+	const identical = states.filter(({ state }) => state === "identical").length;
 
 	const summary = [
-		`${identical} up to date, ${missing.length} missing, ${differing.length} different`,
+		`${identical} up to date, ${pending.length} pending, ${overwrites.length} differing`,
 		...PRESET_FILES.map((file) => statusLine(file, agentDir)),
 	].join("\n");
 
-	if (missing.length === 0 && differing.length === 0) {
+	if (pending.length === 0 && overwrites.length === 0) {
 		ctx.ui.notify(`preset: nothing to do — all configs already applied\n${summary}`, "info");
 		return;
 	}
 
 	const choices: string[] = [];
-	const missingChoice = `Apply ${missing.length} missing config${missing.length === 1 ? "" : "s"}`;
-	const forceChoice = `Apply all and overwrite ${differing.length} existing file${differing.length === 1 ? "" : "s"} (keeps .bak)`;
-	if (missing.length > 0) choices.push(missingChoice);
-	if (differing.length > 0) choices.push(forceChoice);
+	const pendingChoice = `Apply ${pending.length} pending config${pending.length === 1 ? "" : "s"}`;
+	const forceChoice = `Apply all and overwrite ${overwrites.length} differing file${overwrites.length === 1 ? "" : "s"} (keeps .bak)`;
+	if (pending.length > 0) choices.push(pendingChoice);
+	if (overwrites.length > 0) choices.push(forceChoice);
 	choices.push("Cancel");
 
 	const answer = await ctx.ui.select(`preset: ${summary}`, choices);
@@ -367,10 +447,9 @@ async function runInteractive(ctx: ExtensionCommandContext, agentDir: string): P
 
 	const results: ApplyResult[] = [];
 	const force = answer === forceChoice;
-	for (const file of PRESET_FILES) {
-		const state = stateOf(file, agentDir);
+	for (const { file, state } of states) {
 		if (state === "identical" || state === "no-template") continue;
-		if (state === "differs" && !force) continue;
+		if (state === "differs" && !force && !appliesWithoutForce(file, state)) continue;
 		results.push(applyFile(file, agentDir, force));
 	}
 
@@ -469,7 +548,7 @@ export default function (pi: ExtensionAPI): void {
 		pi.on("session_start", async (_event, ctx) => {
 			if (!ctx.hasUI) return;
 			const agentDir = getAgentDir();
-			const pending = PRESET_FILES.filter((file) => stateOf(file, agentDir) === "missing");
+			const pending = PRESET_FILES.filter((file) => appliesWithoutForce(file, stateOf(file, agentDir)));
 			if (pending.length === 0) return;
 			ctx.ui.notify(
 				`preset: ${pending.map((file) => file.id).join(", ")} not applied yet — run /preset`,

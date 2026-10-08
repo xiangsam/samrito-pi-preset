@@ -5,7 +5,9 @@
  * Five checks, in increasing order of fidelity:
  *   1. manifest          — pi.extensions/pi.themes match the installed plugin tree
  *   2. package manager   — pi's DefaultPackageManager resolves the bundle
- *   3. extension loading — pi's loadExtensions() imports every entry
+ *   3. extension loading — pi's loadExtensions() imports every entry, and the
+ *                          loaded shortcuts are checked against pi's built-in
+ *                          keybindings with and without config/keybindings.json
  *   4. plugin filters    — the `packages[]` filter /preset writes actually
  *                          disables exactly the named plugins when pi reads it
  *   5. startup conflicts — bundled plugins also listed individually in settings
@@ -23,13 +25,11 @@
  *   node scripts/verify.mjs [--verbose]
  */
 
-import { execFileSync } from "node:child_process";
 import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
-	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -40,7 +40,9 @@ import { pathToFileURL } from "node:url";
 import {
 	BUNDLED_RESOURCE_TYPES,
 	EXCLUDED_PACKAGES,
+	KEYBINDING_PATCHES,
 	PACKAGE_ROOT,
+	applyKeybindingPatches,
 	applyPluginFilter,
 	bundledPackageNames,
 	bundledPlugins,
@@ -48,13 +50,18 @@ import {
 	collectThemeFiles,
 	disabledPlugins,
 	findOwnPackageEntry,
+	findPiModule,
 	findSettingsConflicts,
+	keybindingsTemplateContent,
 	manifestDrift,
 	manifestExtensionEntries,
 	manifestThemeEntries,
+	missingToolAdditions,
+	planKeybindingPatch,
 	pluginState,
 	readJson,
 	readPackageJson,
+	withToolAdditions,
 } from "./pi-package-lib.mjs";
 
 const verbose = process.argv.includes("--verbose");
@@ -140,45 +147,52 @@ if (drift.stale.length === 0) {
 
 // The config templates are what /preset copies; a missing one is a broken
 // command, not a cosmetic problem.
-for (const template of ["pi-permission-system.config.json", "pi-cliproxyapi-provider.config.json", "no-readonly-tool-autoload.ts"]) {
+for (const template of [
+	"pi-permission-system.config.json",
+	"pi-cliproxyapi-provider.config.json",
+	"keybindings.json",
+]) {
 	if (existsSync(join(PACKAGE_ROOT, "config", template))) continue;
 	problem(`config/${template} is missing (the /preset command ships it)`);
 }
 ok("config templates present");
 
+// keybindings.json is written from KEYBINDING_PATCHES, the same table the
+// runtime patch reads, and applying those patches to an empty keybindings file
+// must reproduce it byte for byte. Otherwise the shipped template and the patch
+// disagree and the shortcut conflict quietly stays.
+const keybindingsTemplatePath = join(PACKAGE_ROOT, "config", "keybindings.json");
+if (readFileSync(keybindingsTemplatePath, "utf-8") !== keybindingsTemplateContent()) {
+	problem(
+		"config/keybindings.json drifted from KEYBINDING_PATCHES (rewrite it from keybindingsTemplateContent())",
+	);
+} else {
+	ok("config/keybindings.json matches KEYBINDING_PATCHES");
+}
+
+for (const patch of KEYBINDING_PATCHES) {
+	const both = patch.release.filter((key) => patch.keep.includes(key));
+	if (both.length > 0) problem(`${patch.action} releases and keeps ${both.join(", ")} at the same time`);
+	if (patch.keep.length === 0) problem(`${patch.action} has no keys left, so the patch would disable the action`);
+}
+
+// defaultTools is merged, not replaced: `+codemode` must survive whatever list
+// the user already has, and a list that already enables codemode is a no-op.
+if (missingToolAdditions({ defaultTools: ["read", "bash"] }).length !== 1) {
+	problem("missingToolAdditions ignores an additive defaultTools list");
+} else if (missingToolAdditions({ defaultTools: ["+codemode"] }).length !== 0) {
+	problem("missingToolAdditions re-adds an already-enabled codemode");
+} else if (missingToolAdditions({ defaultTools: ["-codemode"] }).length !== 0) {
+	problem("missingToolAdditions overrides an explicit `-codemode`");
+} else if (withToolAdditions({ defaultTools: ["read"] }).defaultTools.join(",") !== "read,+codemode") {
+	problem("withToolAdditions must append `+codemode` after the existing list");
+} else {
+	ok("defaultTools merge appends `+codemode`, is idempotent, and respects `-codemode`");
+}
+
 // ------------------------------------------------------- 2. locate the install
 
 heading("2. pi package resolution");
-
-function findPiModule() {
-	if (process.env.PI_MODULE_PATH && existsSync(process.env.PI_MODULE_PATH)) {
-		return process.env.PI_MODULE_PATH;
-	}
-	let binary;
-	try {
-		binary = execFileSync("which", ["pi"], { encoding: "utf-8" }).trim();
-	} catch {
-		return undefined;
-	}
-	let current;
-	try {
-		current = dirname(realpathSync(binary));
-	} catch {
-		return undefined;
-	}
-	while (current !== dirname(current)) {
-		const manifestPath = join(current, "package.json");
-		if (existsSync(manifestPath)) {
-			const manifest = readJson(manifestPath);
-			if (manifest?.name === "@earendil-works/pi-coding-agent") {
-				const entry = join(current, manifest.exports?.["."]?.import ?? "dist/index.js");
-				return existsSync(entry) ? entry : undefined;
-			}
-		}
-		current = dirname(current);
-	}
-	return undefined;
-}
 
 const tempAgentDir = mkdtempSync(join(tmpdir(), "pi-verify-"));
 const piModule = findPiModule();
@@ -258,6 +272,61 @@ try {
 		const preset = result.extensions.find((extension) => extension.commands.has("preset"));
 		if (preset) ok("/preset command is registered");
 		else problem("/preset command is missing, so plugin enable/disable is unreachable");
+
+		// ------------------------------------- 3b. shortcut conflicts
+
+		// An extension shortcut that a built-in action still claims makes pi warn
+		// with "Extension shortcut conflict" on every start. config/keybindings.json
+		// exists to free ctrl+b for @sakiko233/pi-background-tasks; drive pi's own
+		// KeybindingsManager + ExtensionRunner and diff the diagnostics with and
+		// without the patch, because reading the JSON back would not prove the
+		// warning is actually gone.
+		const { ExtensionRunner } = await import(
+			pathToFileURL(join(dirname(piModule), "core/extensions/runner.js")).href
+		);
+		const { KeybindingsManager } = await import(
+			pathToFileURL(join(dirname(piModule), "core/keybindings.js")).href
+		);
+		const { createExtensionRuntime } = loader;
+
+		const shortcutDiagnostics = (agentDir) => {
+			mkdirSync(agentDir, { recursive: true });
+			const runner = new ExtensionRunner(
+				result.extensions,
+				createExtensionRuntime(),
+				PACKAGE_ROOT,
+				undefined,
+				undefined,
+			);
+			runner.getShortcuts(KeybindingsManager.create(agentDir).getEffectiveConfig());
+			return runner.getShortcutDiagnostics().map((diagnostic) => diagnostic.message);
+		};
+
+		// Without keybindings.json pi must be complaining — otherwise the next
+		// check passes for the wrong reason (no extension binds a built-in key).
+		const unpatchedDiagnostics = shortcutDiagnostics(join(tempAgentDir, "keybindings-bare"));
+		if (unpatchedDiagnostics.length === 0) {
+			problem(
+				"pi reports no extension shortcut conflict without keybindings.json; " +
+					"either the bundle no longer collides (drop the template) or this check is inert",
+			);
+		} else {
+			ok(`pi reports ${unpatchedDiagnostics.length} shortcut conflict(s) without keybindings.json`);
+		}
+
+		const patchedAgentDir = join(tempAgentDir, "keybindings-patched");
+		mkdirSync(patchedAgentDir, { recursive: true });
+		const patchedKeybindingsPath = join(patchedAgentDir, "keybindings.json");
+		writeFileSync(patchedKeybindingsPath, planKeybindingPatch(patchedKeybindingsPath).content, "utf-8");
+
+		const patchedDiagnostics = shortcutDiagnostics(patchedAgentDir);
+		if (patchedDiagnostics.length === 0) {
+			ok("config/keybindings.json clears every extension shortcut conflict");
+		} else {
+			problem(
+				`shortcut conflicts remain after the keybindings patch:\n      ${patchedDiagnostics.join("\n      ")}`,
+			);
+		}
 
 		if (verbose) {
 			for (const extension of result.extensions) {
@@ -424,17 +493,70 @@ try {
 				const statusBefore = await run("status");
 				if (statusBefore.includes("not applied yet")) ok("/preset status reports unapplied templates");
 				else problem(`/preset status output unexpected:\n${statusBefore}`);
+				if (statusBefore.includes("keybindings")) ok("/preset status lists the keybindings template");
+				else problem(`/preset status does not mention keybindings:\n${statusBefore}`);
 
-				// Apply the templates into the scratch agent dir.
+				// Apply the templates into the scratch agent dir. Pre-seed
+				// keybindings.json with a binding this package knows nothing about, so
+				// the patch has to preserve it.
+				const commandKeybindings = join(commandAgentDir, "keybindings.json");
+				writeFileSync(
+					commandKeybindings,
+					`${JSON.stringify(
+						{
+							"app.session.new": "ctrl+shift+n",
+							"tui.editor.cursorLeft": ["left", "ctrl+b"],
+						},
+						null,
+						2,
+					)}\n`,
+					"utf-8",
+				);
+
 				await run("apply");
 				const templateTargets = [
 					join(commandAgentDir, "extensions", "pi-permission-system", "config.json"),
 					join(commandAgentDir, "pi-cliproxyapi-provider", "config.json"),
-					join(commandAgentDir, "extensions", "no-readonly-tool-autoload.ts"),
 				];
 				const missingTargets = templateTargets.filter((target) => !existsSync(target));
-				if (missingTargets.length === 0) ok("/preset apply writes all three config templates");
+				if (missingTargets.length === 0) ok("/preset apply writes both copy config templates");
 				else problem(`/preset apply did not write: ${missingTargets.join(", ")}`);
+
+				// `defaultTools` is merged into settings.json the same way the keybindings
+				// file is patched: additive, so the rest of the file survives.
+				const commandSettingsAfter = readJson(commandSettings) ?? {};
+				if ((commandSettingsAfter.defaultTools ?? []).includes("+codemode")) {
+					ok('/preset apply adds "+codemode" to defaultTools');
+				} else {
+					problem(`/preset apply did not enable codemode: ${JSON.stringify(commandSettingsAfter)}`);
+				}
+				if (commandSettingsAfter.theme !== "dark") {
+					problem("/preset apply dropped an unrelated settings key while merging defaultTools");
+				} else if (!existsSync(`${commandSettings}.bak`)) {
+					problem("/preset apply merged defaultTools without keeping a .bak");
+				} else {
+					ok("/preset apply merges defaultTools, keeping the user's other settings");
+				}
+
+				// The keybindings template is merged, not copied: the conflicting key is
+				// dropped, everything else survives, and it needs no --force because it
+				// cannot lose data.
+				const patched = readJson(commandKeybindings) ?? {};
+				if (patched["tui.editor.cursorLeft"]?.includes?.("ctrl+b")) {
+					problem("/preset apply left ctrl+b bound to tui.editor.cursorLeft");
+				} else if (patched["app.session.new"] !== "ctrl+shift+n") {
+					problem(`/preset apply dropped an unrelated binding: ${JSON.stringify(patched)}`);
+				} else if (!existsSync(`${commandKeybindings}.bak`)) {
+					problem("/preset apply patched keybindings.json without keeping a .bak");
+				} else {
+					ok("/preset apply merges keybindings.json, keeping the user's other bindings");
+				}
+
+				const secondApply = await run("apply");
+				if (secondApply.includes("kept keybindings")) ok("/preset apply is idempotent for the keybindings patch");
+				else problem(`/preset apply re-patched an already-correct keybindings.json:\n${secondApply}`);
+				if (secondApply.includes("kept default-tools")) ok("/preset apply is idempotent for the defaultTools merge");
+				else problem(`/preset apply re-added an already-present codemode:\n${secondApply}`);
 
 				// A changed target is left alone unless --force is given.
 				const overwritten = templateTargets[0];

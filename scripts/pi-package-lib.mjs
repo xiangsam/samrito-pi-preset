@@ -317,39 +317,63 @@ export function relativeToPackage(path) {
  * Locate pi's ESM entry point so its own package manager and loader can be
  * imported. Returns undefined when pi is not installed.
  *
- * Set PI_MODULE_PATH to point at pi explicitly; otherwise `pi` is looked up on
- * PATH and its package root walked up to.
+ * Set PI_MODULE_PATH to point at pi explicitly; otherwise two layouts are
+ * tried: the `pi` binary on PATH (npm/global installs and source checkouts,
+ * where the package sits on or above the real binary), then a managed install
+ * (`releases-v1`), whose launcher at `<agent>/bin/pi` is a shell script and
+ * whose package lives under `<agent>/install/releases/<version>/node_modules/`,
+ * named by the agent dir's `current-version` marker.
  */
+
+/** Resolve pi's entry from a candidate package directory, or undefined. */
+function piModuleFromPackageDir(dir) {
+	const manifestPath = join(dir, "package.json");
+	if (!existsSync(manifestPath)) return undefined;
+	const manifest = readJson(manifestPath);
+	if (manifest?.name !== "@earendil-works/pi-coding-agent") return undefined;
+	const entry = join(dir, manifest.exports?.["."]?.import ?? "dist/index.js");
+	return existsSync(entry) ? entry : undefined;
+}
+
+/** Pi module under a managed install root, read from its `current-version`. */
+function managedInstallPiModule() {
+	const roots = [];
+	const fromEnv = process.env.PI_MANAGED_INSTALL_ROOT?.trim();
+	if (fromEnv) roots.push(resolve(fromEnv));
+	roots.push(join(resolveAgentDir(), "install"));
+
+	for (const root of roots) {
+		let version;
+		try {
+			version = readFileSync(join(root, "current-version"), "utf-8").trim();
+		} catch {
+			continue;
+		}
+		if (!version) continue;
+		const found = piModuleFromPackageDir(
+			join(root, "releases", version, "node_modules", "@earendil-works", "pi-coding-agent"),
+		);
+		if (found) return found;
+	}
+	return undefined;
+}
+
 export function findPiModule() {
 	const override = process.env.PI_MODULE_PATH;
 	if (override && existsSync(override)) return override;
 
-	let binary;
 	try {
-		binary = execFileSync("which", ["pi"], { encoding: "utf-8" }).trim();
-	} catch {
-		return undefined;
-	}
-
-	let current;
-	try {
-		current = dirname(realpathSync(binary));
-	} catch {
-		return undefined;
-	}
-
-	while (current !== dirname(current)) {
-		const manifestPath = join(current, "package.json");
-		if (existsSync(manifestPath)) {
-			const manifest = readJson(manifestPath);
-			if (manifest?.name === "@earendil-works/pi-coding-agent") {
-				const entry = join(current, manifest.exports?.["."]?.import ?? "dist/index.js");
-				return existsSync(entry) ? entry : undefined;
-			}
+		const binary = execFileSync("which", ["pi"], { encoding: "utf-8" }).trim();
+		let current = dirname(realpathSync(binary));
+		while (current !== dirname(current)) {
+			const found = piModuleFromPackageDir(current);
+			if (found) return found;
+			current = dirname(current);
 		}
-		current = dirname(current);
+	} catch {
+		// No `pi` on PATH (or an unresolvable binary): try the managed layout.
 	}
-	return undefined;
+	return managedInstallPiModule();
 }
 
 // ---------------------------------------------------------------------------
@@ -641,4 +665,147 @@ export function disabledPlugins(packages, root = PACKAGE_ROOT) {
 	return bundledPlugins(root)
 		.filter((plugin) => pluginState(found.entry, plugin) === "disabled")
 		.map((plugin) => plugin.name);
+}
+
+// ---------------------------------------------------------------------------
+// settings.json: default tool surface
+// ---------------------------------------------------------------------------
+
+/**
+ * Tools this bundle turns on in `settings.json`'s `defaultTools`.
+ *
+ * `codemode` is registered inactive by pi's built-in `builtin:codemode`
+ * extension; naming it in `defaultTools` is the only way to switch it on. The
+ * `+` form is additive, so pi's default `read`/`bash`/`edit`/`write` surface and
+ * any MCP tools are left alone. See docs/codemode.md and docs/cli.md#enable-codemode.
+ */
+export const DEFAULT_TOOL_ADDITIONS = ["+codemode"];
+
+/** Additions `settings.defaultTools` does not already resolve. */
+export function missingToolAdditions(settings, additions = DEFAULT_TOOL_ADDITIONS) {
+	const list = Array.isArray(settings?.defaultTools) ? settings.defaultTools : [];
+	return additions.filter((entry) => {
+		const name = entry.replace(/^[+-]/, "");
+		// A plain name enables it just as well as `+name`.
+		if (list.some((item) => item === entry || item === name)) return false;
+		// Respect an explicit `-name`: the user turned it off on purpose.
+		return !list.includes(`-${name}`);
+	});
+}
+
+/**
+ * Copy of `settings` with every missing addition appended to `defaultTools`.
+ *
+ * Appending is form-agnostic: a list of plain names first selects those tools
+ * and then applies `+name` entries, so `["+codemode"]` appended to
+ * `["read", "bash"]` means "read, bash, and codemode". Returns the same object
+ * when there is nothing to add, so callers can detect a no-op by identity.
+ */
+export function withToolAdditions(settings, additions = DEFAULT_TOOL_ADDITIONS) {
+	const missing = missingToolAdditions(settings, additions);
+	if (missing.length === 0) return settings;
+	const list = Array.isArray(settings?.defaultTools) ? [...settings.defaultTools] : [];
+	return { ...settings, defaultTools: [...list, ...missing] };
+}
+
+// ---------------------------------------------------------------------------
+// keybindings.json
+// ---------------------------------------------------------------------------
+
+/**
+ * Actions this bundle re-binds, and the keys it takes away from them.
+ *
+ * `@sakiko233/pi-background-tasks` calls `pi.registerShortcut('ctrl+b', ...)`
+ * for "move the most recent foreground bash command to the background", but
+ * pi's built-in `tui.editor.cursorLeft` ships with `["left", "ctrl+b"]`, so
+ * every start prints
+ *
+ *   Extension shortcut conflict: 'ctrl+b' is built-in shortcut for
+ *   tui.editor.cursorLeft and .../background-tasks.ts. Using .../background-tasks.ts.
+ *
+ * `tui.editor.cursorLeft` is not in pi's
+ * RESERVED_KEYBINDINGS_FOR_EXTENSION_CONFLICTS list, which means pi expects the
+ * user to resolve it: dropping `ctrl+b` from the action removes the built-in
+ * claim, so `getShortcuts()` finds no collision (the map it checks is built
+ * from the *resolved* keybindings, i.e. defaults + keybindings.json).
+ *
+ * Only the released key is removed from the user's value — `left`, and anything
+ * else they added, stays. `config/keybindings.json` carries the result of this
+ * table in pi's own format and is verified to match it.
+ */
+export const KEYBINDING_PATCHES = [
+	{ action: "tui.editor.cursorLeft", release: ["ctrl+b"], keep: ["left"] },
+];
+
+/** A keybinding value -> array of lowercased key strings (pi accepts either form). */
+function keyList(value) {
+	if (typeof value === "string") return [value.toLowerCase()];
+	if (Array.isArray(value)) {
+		return value.filter((key) => typeof key === "string").map((key) => key.toLowerCase());
+	}
+	return [];
+}
+
+/** The shipped template as an object: `{ action: keys }` for every patch. */
+export function keybindingsTemplate() {
+	const bindings = {};
+	for (const patch of KEYBINDING_PATCHES) bindings[patch.action] = [...patch.keep];
+	return bindings;
+}
+
+/**
+ * Serialized `config/keybindings.json`. Applying the patches to an empty
+ * keybindings.json must produce exactly this, which is what `verify.mjs`
+ * checks.
+ */
+export function keybindingsTemplateContent() {
+	return `${JSON.stringify(keybindingsTemplate(), null, 2)}\n`;
+}
+
+/**
+ * Apply KEYBINDING_PATCHES to a parsed keybindings.json.
+ *
+ * Pure, so `/preset apply`, `setup.mjs` and `verify.mjs` all agree on the
+ * result. An action that no longer claims a released key is left untouched: a
+ * user who already moved `ctrl+b` elsewhere must not be dragged back.
+ *
+ * @returns {{bindings: object, changed: boolean, actions: string[]}}
+ */
+export function applyKeybindingPatches(bindings = {}, patches = KEYBINDING_PATCHES) {
+	const next = { ...bindings };
+	const actions = [];
+
+	for (const patch of patches) {
+		if (!Object.hasOwn(next, patch.action)) {
+			next[patch.action] = [...patch.keep];
+			actions.push(patch.action);
+			continue;
+		}
+		const current = keyList(next[patch.action]);
+		if (!current.some((key) => patch.release.includes(key))) continue;
+
+		const kept = current.filter((key) => !patch.release.includes(key));
+		next[patch.action] = kept.length > 0 ? kept : [...patch.keep];
+		actions.push(patch.action);
+	}
+
+	return { bindings: next, changed: actions.length > 0, actions };
+}
+
+/**
+ * Read `path` and plan the patch without writing anything.
+ *
+ * @returns {{path: string, exists: boolean, changed: boolean, content: string, actions: string[]}}
+ */
+export function planKeybindingPatch(path) {
+	const existing = readJson(path);
+	const bindings = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
+	const { bindings: next, changed, actions } = applyKeybindingPatches(bindings);
+	return {
+		path,
+		exists: existing !== undefined,
+		changed,
+		content: `${JSON.stringify(next, null, 2)}\n`,
+		actions,
+	};
 }
