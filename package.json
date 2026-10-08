@@ -1,6 +1,6 @@
 {
   "name": "samrito-pi-preset",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "type": "module",
   "description": "Portable pi agent setup: bundles the plugin collection and user config templates so another machine can be brought up with one install, with per-plugin disable/enable from the /preset command.",
   "keywords": [
